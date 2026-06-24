@@ -1,0 +1,80 @@
+cmake_minimum_required(VERSION 3.28)
+
+project(shared_desktop VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
+include(FetchContent)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+set(SHARED_LOGFAULT_SOURCE_DIR "/home/jgaa/src/logfault" CACHE PATH "Use a local source dir for logfault")
+if(SHARED_LOGFAULT_SOURCE_DIR AND EXISTS "${SHARED_LOGFAULT_SOURCE_DIR}/CMakeLists.txt")
+    message(STATUS "shared_desktop: using local logfault from ${SHARED_LOGFAULT_SOURCE_DIR}")
+    FetchContent_Declare(logfault SOURCE_DIR "${SHARED_LOGFAULT_SOURCE_DIR}")
+else()
+    FetchContent_Declare(logfault
+        GIT_REPOSITORY https://github.com/jgaa/logfault.git
+        GIT_TAG v0.8.5
+    )
+endif()
+FetchContent_MakeAvailable(logfault)
+
+set(SHARED_QCORO_SOURCE_DIR "" CACHE PATH "Use a local source dir for QCoro")
+if(SHARED_QCORO_SOURCE_DIR AND EXISTS "${SHARED_QCORO_SOURCE_DIR}/CMakeLists.txt")
+    message(STATUS "shared_desktop: using local QCoro from ${SHARED_QCORO_SOURCE_DIR}")
+    FetchContent_Declare(qcoro SOURCE_DIR "${SHARED_QCORO_SOURCE_DIR}")
+else()
+    FetchContent_Declare(qcoro
+        GIT_REPOSITORY https://github.com/qcoro/qcoro.git
+        GIT_TAG v0.13.0
+    )
+endif()
+set(QCORO_BUILD_EXAMPLES OFF CACHE BOOL "Disable QCoro examples in shared_desktop" FORCE)
+set(QCORO_BUILD_TESTING OFF CACHE BOOL "Disable QCoro tests in shared_desktop" FORCE)
+set(QCORO_WITH_QTDBUS OFF CACHE BOOL "Disable unused QCoro DBus support" FORCE)
+set(QCORO_WITH_QTWEBSOCKETS OFF CACHE BOOL "Disable unused QCoro WebSockets support" FORCE)
+set(QCORO_WITH_QTQUICK OFF CACHE BOOL "Disable unused QCoro QtQuick support" FORCE)
+set(QCORO_WITH_QML OFF CACHE BOOL "Disable unused QCoro QML support" FORCE)
+set(QCORO_WITH_QTTEST OFF CACHE BOOL "Disable unused QCoro QtTest support" FORCE)
+FetchContent_MakeAvailable(qcoro)
+
+find_package(Qt6 6.10 REQUIRED COMPONENTS
+    Concurrent
+    Core
+    Core5Compat
+    Gui
+    Network
+    Protobuf
+    ProtobufTools
+    Qml
+    Quick
+    QuickControls2
+    Test
+)
+
+find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
+
+qt_standard_project_setup(REQUIRES 6.10)
+
+include(CTest)
+
+include(shared_common)
+
+add_subdirectory(src/core)
+add_subdirectory(src/daemon)
+add_subdirectory(src/gui)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

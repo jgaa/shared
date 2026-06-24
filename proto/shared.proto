@@ -1,0 +1,343 @@
+syntax = "proto3";
+
+package shared.v1;
+
+option java_package = "eu.lastviking.shared.proto";
+option java_outer_classname = "SharedProto";
+
+// Transport framing outside protobuf:
+//
+//   uint32_be frame_size, big endian network format.
+//   bytes     serialized Envelope
+//
+// frame_size is the number of bytes in the serialized Envelope.
+// frame_size does not include the 4-byte length prefix.
+
+// -----------------------------------------------------------------------------
+// Common types
+// -----------------------------------------------------------------------------
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_LINUX = 1;
+  PLATFORM_ANDROID = 2;
+  PLATFORM_MACOS = 3;
+  PLATFORM_WINDOWS = 4;
+}
+
+enum TransferType {
+  TRANSFER_TYPE_UNSPECIFIED = 0;
+  TRANSFER_TYPE_CLIPBOARD_TEXT = 1;
+  TRANSFER_TYPE_FILE = 2;
+}
+
+enum TransferStatusCode {
+  TRANSFER_STATUS_UNSPECIFIED = 0;
+  TRANSFER_STATUS_ACCEPTED = 1;
+  TRANSFER_STATUS_REJECTED = 2;
+  TRANSFER_STATUS_COMPLETED = 3;
+  TRANSFER_STATUS_ERROR = 4;
+  TRANSFER_STATUS_CANCELLED = 5;
+}
+
+enum ErrorCode {
+  ERROR_UNSPECIFIED = 0;
+  ERROR_REJECTED = 1;
+  ERROR_HASH_MISMATCH = 2;
+  ERROR_DECRYPT_FAILED = 3;
+  ERROR_DISK_ERROR = 4;
+  ERROR_NETWORK_ERROR = 5;
+  ERROR_TIMEOUT = 6;
+  ERROR_CANCELLED = 7;
+  ERROR_UNSUPPORTED = 8;
+  ERROR_PROTOCOL = 9;
+}
+
+message PeerId {
+  // UUIDv7 string, lowercase canonical form.
+  string uuid = 1;
+}
+
+message TransferId {
+  // UUIDv7 string, lowercase canonical form.
+  string uuid = 1;
+}
+
+message PeerIdentity {
+  PeerId peer_id = 1;
+
+  // Human-readable name, normally "user@host".
+  string name = 2;
+
+  Platform platform = 3;
+}
+
+message PeerAddress {
+  string ip = 1;
+  uint32 port = 2;
+
+  // direct, mdns, broadcast, manual, gossip
+  string source = 3;
+
+  // Unix epoch milliseconds UTC.
+  uint64 observed_time_ms = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Top-level envelope
+// -----------------------------------------------------------------------------
+
+message Envelope {
+  uint32 protocol_version = 1; // v1 = 1
+
+  // UUIDv7 string for tracing/logging/deduplication.
+  string message_id = 2;
+
+  // Optional request correlation ID.
+  optional uint32 request_id = 3;
+
+  oneof body {
+    PeerInfo peer_info = 10;
+    PeerList peer_list = 11;
+    AddressHint address_hint = 12;
+
+    WhoHas who_has = 20;
+    WhoHasReply who_has_reply = 21;
+
+    TransferOffer transfer_offer = 30;
+    TransferStatus transfer_status = 31;
+    TransferChunk transfer_chunk = 32;
+
+    RelayEnvelope relay_envelope = 40;
+
+    EnrollmentRequest enrollment_request = 50;
+    EnrollmentDecision enrollment_decision = 51;
+
+    KeepAlive keep_alive = 60;
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Handshake / peer info
+// -----------------------------------------------------------------------------
+
+message PeerInfo {
+  PeerIdentity identity = 1;
+
+  uint32 peer_list_version = 2;
+
+  // Port where this peer accepts incoming TCP/mTLS connections.
+  uint32 listen_port = 3;
+
+  // UUIDv7 string. Used for duplicate connection tie-breaks.
+  string connection_id = 4;
+
+  repeated PeerAddress known_addresses = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Signed peer list
+// -----------------------------------------------------------------------------
+
+message PeerList {
+  uint32 version = 1;
+  uint64 created_time_ms = 2;
+
+  PeerId trusted_agent_peer_id = 3;
+
+  repeated PeerListEntry peers = 4;
+
+  // Signature over deterministically serialized PeerListToSign.
+  bytes signature = 5;
+
+  string signature_algorithm = 6;
+}
+
+message PeerListToSign {
+  uint32 version = 1;
+  uint64 created_time_ms = 2;
+  PeerId trusted_agent_peer_id = 3;
+  repeated PeerListEntry peers = 4;
+}
+
+message PeerListEntry {
+  PeerIdentity identity = 1;
+
+  // SHA-256 certificate fingerprint, lowercase hex.
+  string certificate_fingerprint_sha256 = 2;
+
+  uint64 certificate_not_before_ms = 3;
+  uint64 certificate_not_after_ms = 4;
+
+  // Raw 32-byte X25519 public key used for payload key agreement.
+  bytes x25519_public_key = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Address gossip
+// -----------------------------------------------------------------------------
+
+message AddressHint {
+  PeerId peer_id = 1;
+  repeated PeerAddress addresses = 2;
+}
+
+// -----------------------------------------------------------------------------
+// Routing
+// -----------------------------------------------------------------------------
+
+message WhoHas {
+  PeerId destination_peer_id = 1;
+
+  // Optional. Present when query is for a concrete transfer.
+  optional TransferId transfer_id = 2;
+}
+
+message WhoHasReply {
+  PeerId destination_peer_id = 1;
+
+  bool reachable = 2;
+
+  // The replying peer. Used as relay if selected.
+  PeerId relay_peer_id = 3;
+
+  uint32 rtt_ms = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Transfers
+// -----------------------------------------------------------------------------
+
+message TransferOffer {
+  TransferId transfer_id = 1;
+
+  TransferType transfer_type = 2;
+
+  PeerId sender_peer_id = 3;
+  repeated PeerId recipient_peer_ids = 4;
+
+  uint64 created_time_ms = 5;
+
+  TransferMetadata metadata = 6;
+
+  repeated RecipientKey recipient_keys = 7;
+}
+
+message TransferMetadata {
+  // Empty for clipboard text.
+  string filename = 1;
+
+  // Examples:
+  // text/plain; charset=utf-8
+  // application/octet-stream
+  string mime_type = 2;
+
+  // Plaintext size in bytes.
+  uint64 size = 3;
+
+  // SHA-256 of plaintext payload, lowercase hex.
+  string sha256 = 4;
+
+  // v1 fixed value: 4194304
+  uint32 chunk_size = 5;
+
+  uint64 chunk_count = 6;
+}
+
+message RecipientKey {
+  PeerId peer_id = 1;
+
+  // Symmetric payload key encrypted for this peer.
+  bytes encrypted_key = 2;
+
+  // v1 fixed value: "x25519-hkdf-sha256".
+  string key_algorithm = 3;
+}
+
+message TransferStatus {
+  TransferId transfer_id = 1;
+
+  PeerId peer_id = 2;
+
+  TransferStatusCode status = 3;
+
+  ErrorCode error_code = 4;
+
+  string message = 5;
+}
+
+message TransferChunk {
+  TransferId transfer_id = 1;
+
+  uint64 chunk_index = 2;
+
+  // Plaintext byte offset represented by this chunk.
+  uint64 offset = 3;
+
+  bytes ciphertext = 4;
+
+  // AES-GCM nonce.
+  bytes nonce = 5;
+
+  // AES-GCM authentication tag.
+  bytes auth_tag = 6;
+}
+
+// -----------------------------------------------------------------------------
+// Relay
+// -----------------------------------------------------------------------------
+
+message RelayEnvelope {
+  PeerId source_peer_id = 1;
+  PeerId destination_peer_id = 2;
+
+  // Optional but normally present for transfer traffic.
+  optional TransferId transfer_id = 3;
+
+  // Complete serialized Envelope intended for destination.
+  // The relay forwards this without interpreting the inner body.
+  bytes inner_envelope = 4;
+}
+
+// -----------------------------------------------------------------------------
+// Enrollment
+// -----------------------------------------------------------------------------
+
+message EnrollmentRequest {
+  PeerIdentity requested_identity = 1;
+
+  // DER encoded certificate signing request.
+  bytes certificate_request = 2;
+
+  // First 8 lowercase hex chars of SHA-256(DER-encoded CSR).
+  string verification_code = 3;
+
+  // Raw 32-byte X25519 public key for payload key agreement.
+  bytes x25519_public_key = 4;
+}
+
+message EnrollmentDecision {
+  bool approved = 1;
+
+  string message = 2;
+
+  // DER encoded signed certificate, present when approved.
+  optional bytes signed_certificate = 3;
+
+  // Latest signed peer list, present when approved.
+  optional PeerList peer_list = 4;
+
+  // DER encoded trusted-agent CA certificate, present when approved.
+  optional bytes trusted_agent_ca_certificate = 5;
+}
+
+// -----------------------------------------------------------------------------
+// Keep-alive
+// -----------------------------------------------------------------------------
+
+message KeepAlive {
+  uint64 time_ms = 1;
+
+  // Set when this message is a reply.
+  uint64 reply_to_time_ms = 2;
+}
