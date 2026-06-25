@@ -38,6 +38,7 @@ enum TransferStatusCode {
   TRANSFER_STATUS_COMPLETED = 3;
   TRANSFER_STATUS_ERROR = 4;
   TRANSFER_STATUS_CANCELLED = 5;
+  TRANSFER_STATUS_PENDING_APPROVAL = 6;
 }
 
 enum ErrorCode {
@@ -100,6 +101,7 @@ message Envelope {
     PeerInfo peer_info = 10;
     PeerList peer_list = 11;
     AddressHint address_hint = 12;
+    ReachabilityAdvertisement reachability_advertisement = 13;
 
     WhoHas who_has = 20;
     WhoHasReply who_has_reply = 21;
@@ -180,6 +182,13 @@ message PeerListEntry {
 message AddressHint {
   PeerId peer_id = 1;
   repeated PeerAddress addresses = 2;
+}
+
+message ReachabilityAdvertisement {
+  PeerId advertiser_peer_id = 1;
+  repeated PeerId directly_reachable_peer_ids = 2;
+  uint64 created_time_ms = 3;
+  uint32 ttl_ms = 4;
 }
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Shared
+Comment=Secure peer-to-peer clipboard and file transfer
+Exec=sharedgui
+Icon=eu.lastviking.shared
+Categories=Network;FileTransfer;Qt;
+StartupNotify=true
+Terminal=false

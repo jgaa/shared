@@ -223,3 +223,7 @@ Hard maximum:
 8 MiB
 
 Oversized clipboard payloads must be rejected before transfer begins.
+
+When the receiver requires user confirmation before accepting clipboard text, it should send
+`TRANSFER_STATUS_PENDING_APPROVAL` to the sender and complete or reject the transfer after the
+user acts or the approval request times out.

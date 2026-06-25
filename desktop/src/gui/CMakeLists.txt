@@ -16,6 +16,8 @@ qt_add_qml_module(sharedui
         qml/LogViewerDialog.qml
         qml/Main.qml
         qml/PeersDialog.qml
+        qml/SendClipboardDialog.qml
+        qml/SendFilesDialog.qml
         qml/SettingsDialog.qml
 )
 
@@ -26,6 +28,7 @@ target_link_libraries(sharedui PUBLIC
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
     sharedservice
     sharedcore
 )
@@ -42,6 +45,7 @@ target_link_libraries(sharedgui PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Widgets
     sharedui
     shareduiplugin
     shareduiplugin_init

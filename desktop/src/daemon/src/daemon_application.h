@@ -21,6 +21,56 @@ public:
 
     [[nodiscard]] bool start();
     void apply_configuration_change();
+    [[nodiscard]] bool send_clipboard_text(
+        const QStringList &peer_ids,
+        const QString &text,
+        QString &error_message);
+    [[nodiscard]] bool send_files(
+        const QStringList &peer_ids,
+        const QStringList &file_paths,
+        QString &error_message);
+    [[nodiscard]] bool approve_clipboard_transfer(const QString &transfer_id, QString &error_message);
+    [[nodiscard]] bool reject_clipboard_transfer(
+        const QString &transfer_id,
+        const QString &message,
+        QString &error_message);
+    [[nodiscard]] bool approve_file_transfer(const QString &transfer_id, QString &error_message);
+    [[nodiscard]] bool reject_file_transfer(
+        const QString &transfer_id,
+        const QString &message,
+        QString &error_message);
+
+signals:
+    void clipboard_approval_requested(
+        const QString &transfer_id,
+        const QString &sender_peer_id,
+        const QString &sender_name,
+        quint64 size_bytes);
+    void clipboard_text_received(const QString &sender_peer_id, const QString &sender_name, const QString &text);
+    void clipboard_transfer_status(
+        const QString &transfer_id,
+        const QString &peer_id,
+        const QString &peer_name,
+        int status,
+        const QString &message);
+    void file_approval_requested(
+        const QString &transfer_id,
+        const QString &sender_peer_id,
+        const QString &sender_name,
+        const QString &filename,
+        quint64 size_bytes);
+    void file_received(
+        const QString &sender_peer_id,
+        const QString &sender_name,
+        const QString &filename,
+        const QString &saved_path,
+        quint64 size_bytes);
+    void file_transfer_status(
+        const QString &transfer_id,
+        const QString &peer_id,
+        const QString &peer_name,
+        int status,
+        const QString &message);
 
 private slots:
     void reload_configuration();

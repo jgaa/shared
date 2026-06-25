@@ -7,7 +7,7 @@
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
-#include <QtGui/QGuiApplication>
+#include <QtWidgets/QApplication>
 #include <QtQml/QQmlApplicationEngine>
 #include <QtQml/QQmlContext>
 
@@ -17,10 +17,10 @@ namespace {
 
 void set_application_metadata()
 {
-    QGuiApplication::setOrganizationName(shared::desktop::core::app_metadata::organization_name);
-    QGuiApplication::setOrganizationDomain(shared::desktop::core::app_metadata::organization_domain);
-    QGuiApplication::setApplicationName(shared::desktop::core::app_metadata::gui_application_name);
-    QGuiApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setOrganizationName(shared::desktop::core::app_metadata::organization_name);
+    QApplication::setOrganizationDomain(shared::desktop::core::app_metadata::organization_domain);
+    QApplication::setApplicationName(shared::desktop::core::app_metadata::gui_application_name);
+    QApplication::setApplicationVersion(QStringLiteral(SHARED_APP_VERSION));
 }
 
 }
@@ -28,7 +28,7 @@ void set_application_metadata()
 int main(int argc, char *argv[])
 {
     set_application_metadata();
-    QGuiApplication app{argc, argv};
+    QApplication app{argc, argv};
 
     QCommandLineParser parser{};
     parser.setApplicationDescription(QStringLiteral("shared desktop GUI"));
@@ -97,6 +97,7 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine{};
     shared::desktop::gui::app_controller controller{};
+    controller.set_service(&service);
     QObject::connect(
         &controller,
         &shared::desktop::gui::app_controller::configuration_changed,

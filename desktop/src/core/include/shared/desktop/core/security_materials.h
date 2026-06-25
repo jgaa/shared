@@ -11,7 +11,6 @@
 namespace shared::desktop::core {
 
 class configuration_repository;
-class openssl_runner;
 
 class security_materials {
 public:
@@ -119,7 +118,6 @@ private:
         QString &error_message) const;
 
     const app_paths &app_paths_;
-    openssl_runner *openssl_runner_ptr_{};
 };
 
 }

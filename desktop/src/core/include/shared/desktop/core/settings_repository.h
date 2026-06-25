@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QtCore/QSettings>
+#include <QtCore/QString>
 
 namespace shared::desktop::core {
 
@@ -13,6 +14,12 @@ public:
 
     [[nodiscard]] int clipboard_limit_bytes() const;
     void set_clipboard_limit_bytes(int value);
+    [[nodiscard]] bool auto_accept_clipboard() const;
+    void set_auto_accept_clipboard(bool value);
+    [[nodiscard]] bool auto_accept_files() const;
+    void set_auto_accept_files(bool value);
+    [[nodiscard]] QString download_path() const;
+    void set_download_path(const QString &value);
 
 private:
     [[nodiscard]] QSettings create_settings() const;

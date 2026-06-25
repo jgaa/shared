@@ -17,7 +17,7 @@ void set_application_metadata()
     QCoreApplication::setOrganizationName(shared::desktop::core::app_metadata::organization_name);
     QCoreApplication::setOrganizationDomain(shared::desktop::core::app_metadata::organization_domain);
     QCoreApplication::setApplicationName(shared::desktop::core::app_metadata::daemon_application_name);
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(SHARED_APP_VERSION));
 }
 
 }

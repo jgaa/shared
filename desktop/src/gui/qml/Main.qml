@@ -5,6 +5,14 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: window
 
+    function droppedUrlsToStrings(urls) {
+        const selected = []
+        for (const url of urls) {
+            selected.push(url.toString())
+        }
+        return selected
+    }
+
     width: 900
     height: 600
     visible: true
@@ -12,6 +20,48 @@ ApplicationWindow {
     menuBar: MenuBar {
         Menu {
             title: "File"
+
+            Action {
+                text: "Send Clipboard..."
+                enabled: app_controller.configured
+                onTriggered: send_clipboard_dialog.open()
+            }
+
+            Action {
+                text: "Send Clipboard To All"
+                enabled: app_controller.configured
+                onTriggered: app_controller.send_clipboard_to_all()
+            }
+
+            Action {
+                text: "Send Files..."
+                enabled: app_controller.configured
+                onTriggered: {
+                    const selected = app_controller.select_files()
+                    if (selected.length === 0) {
+                        return
+                    }
+
+                    send_files_dialog.selectedFiles = selected
+                    send_files_dialog.open()
+                }
+            }
+
+            Action {
+                text: "Send Files To All"
+                enabled: app_controller.configured
+                onTriggered: {
+                    const selected = app_controller.select_files()
+                    if (selected.length === 0) {
+                        return
+                    }
+
+                    app_controller.send_files_to_all(selected)
+                }
+            }
+
+            MenuSeparator {
+            }
 
             Action {
                 text: "Peers"
@@ -296,6 +346,107 @@ ApplicationWindow {
         }
 
         Frame {
+            visible: app_controller.configured
+            Layout.fillWidth: true
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 12
+
+                Label {
+                    text: "Copy"
+                    font.pixelSize: 20
+                    font.bold: true
+                }
+
+                Label {
+                    visible: !app_controller.copy_targets_available
+                    text: "No peers are connected or currently reachable."
+                    color: palette.mid
+                    Layout.fillWidth: true
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Button {
+                        text: "Copy Clipboard To Peer"
+                        enabled: app_controller.copy_targets_available
+                        onClicked: send_clipboard_dialog.open()
+                    }
+
+                    Button {
+                        text: "Copy Clipboard To All"
+                        enabled: app_controller.copy_targets_available
+                        onClicked: app_controller.send_clipboard_to_all()
+                    }
+
+                    Rectangle {
+                        width: Math.max(220, (window.width - 180) / 2)
+                        height: 52
+                        radius: 8
+                        color: drop_to_peer.containsDrag ? "#dbe9d4" : "#f7f4ec"
+                        border.color: app_controller.copy_targets_available ? "#9b8f7d" : "#d2c7b6"
+                        border.width: 1
+
+                        Label {
+                            anchors.centerIn: parent
+                            text: "Drop File To Peer"
+                            color: app_controller.copy_targets_available ? palette.text : palette.mid
+                        }
+
+                        DropArea {
+                            id: drop_to_peer
+
+                            anchors.fill: parent
+                            enabled: app_controller.copy_targets_available
+                            onDropped: function(drop) {
+                                const selected = window.droppedUrlsToStrings(drop.urls)
+                                if (selected.length === 0) {
+                                    return
+                                }
+
+                                send_files_dialog.selectedFiles = selected
+                                send_files_dialog.open()
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: Math.max(220, (window.width - 180) / 2)
+                        height: 52
+                        radius: 8
+                        color: drop_to_all.containsDrag ? "#dbe9d4" : "#f7f4ec"
+                        border.color: app_controller.copy_targets_available ? "#9b8f7d" : "#d2c7b6"
+                        border.width: 1
+
+                        Label {
+                            anchors.centerIn: parent
+                            text: "Drop File To All"
+                            color: app_controller.copy_targets_available ? palette.text : palette.mid
+                        }
+
+                        DropArea {
+                            id: drop_to_all
+
+                            anchors.fill: parent
+                            enabled: app_controller.copy_targets_available
+                            onDropped: function(drop) {
+                                const selected = window.droppedUrlsToStrings(drop.urls)
+                                if (selected.length === 0) {
+                                    return
+                                }
+
+                                app_controller.send_files_to_all(selected)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Frame {
             visible: app_controller.trusted_agent
             Layout.fillWidth: true
 
@@ -365,9 +516,143 @@ ApplicationWindow {
         parent: window.contentItem
     }
 
+    SendClipboardDialog {
+        id: send_clipboard_dialog
+        parent: window.contentItem
+        controller: app_controller
+    }
+
+    SendFilesDialog {
+        id: send_files_dialog
+        parent: window.contentItem
+        controller: app_controller
+    }
+
     AboutDialog {
         id: about_dialog
         parent: window.contentItem
+    }
+
+    Dialog {
+        id: clipboard_approval_dialog
+
+        x: (window.width - width) / 2
+        y: (window.height - height) / 2
+        width: Math.min(window.width - 120, 460)
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        title: "Approve Clipboard Transfer"
+        visible: app_controller.clipboard_approval_pending
+
+        onVisibleChanged: {
+            if (visible) {
+                window.show()
+                window.raise()
+                window.requestActivate()
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            Label {
+                text: "Incoming clipboard text requires approval."
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: "Sender: " + app_controller.clipboard_approval_sender_name
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: "Size: " + app_controller.clipboard_approval_size_bytes + " bytes"
+                Layout.fillWidth: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+
+                Item {
+                    Layout.fillWidth: true
+                }
+
+                Button {
+                    text: "Reject"
+                    onClicked: app_controller.reject_clipboard_transfer()
+                }
+
+                Button {
+                    text: "Approve"
+                    onClicked: app_controller.approve_clipboard_transfer()
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: file_approval_dialog
+
+        x: (window.width - width) / 2
+        y: (window.height - height) / 2
+        width: Math.min(window.width - 120, 500)
+        modal: true
+        closePolicy: Popup.NoAutoClose
+        title: "Approve File Transfer"
+        visible: app_controller.file_approval_pending
+
+        onVisibleChanged: {
+            if (visible) {
+                window.show()
+                window.raise()
+                window.requestActivate()
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            Label {
+                text: "Incoming file transfer requires approval."
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: "Sender: " + app_controller.file_approval_sender_name
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: "File: " + app_controller.file_approval_filename
+                Layout.fillWidth: true
+                wrapMode: Text.WrapAnywhere
+            }
+
+            Label {
+                text: "Size: " + app_controller.file_approval_size_bytes + " bytes"
+                Layout.fillWidth: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+
+                Item {
+                    Layout.fillWidth: true
+                }
+
+                Button {
+                    text: "Reject"
+                    onClicked: app_controller.reject_file_transfer()
+                }
+
+                Button {
+                    text: "Approve"
+                    onClicked: app_controller.approve_file_transfer()
+                }
+            }
+        }
     }
 
     Dialog {

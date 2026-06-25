@@ -109,6 +109,7 @@ void sharedcore_tests::envelope_io_round_trip()
     shared::v1::Envelope envelope{};
     envelope.setProtocolVersion(1);
     envelope.setMessageId(QStringLiteral("abc"));
+    envelope.setRequestId(42);
     envelope.setEnrollmentRequest(request);
 
     auto framed_message = shared::desktop::core::envelope_io::serialize(envelope);
@@ -119,9 +120,32 @@ void sharedcore_tests::envelope_io_round_trip()
     QVERIFY(shared::desktop::core::envelope_io::try_read_message(framed_message, decoded, error_message));
     QVERIFY2(error_message.isEmpty(), qPrintable(error_message));
     QVERIFY(decoded.hasEnrollmentRequest());
+    QVERIFY(decoded.hasRequestId());
+    QCOMPARE(decoded.requestId(), static_cast<quint32>(42));
     QCOMPARE(decoded.enrollmentRequest().verificationCode(), QStringLiteral("deadbeef"));
     QCOMPARE(decoded.enrollmentRequest().x25519PublicKey(), QByteArray(32, '\x42'));
     QVERIFY(framed_message.isEmpty());
+
+    shared::v1::PeerId destination_peer_id{};
+    destination_peer_id.setUuid(QStringLiteral("89abcdef-0123-7def-8123-456789abcdef"));
+
+    shared::v1::WhoHas who_has{};
+    who_has.setDestinationPeerId(destination_peer_id);
+
+    shared::v1::Envelope who_has_envelope{};
+    who_has_envelope.setProtocolVersion(1);
+    who_has_envelope.setMessageId(QStringLiteral("def"));
+    who_has_envelope.setRequestId(7);
+    who_has_envelope.setWhoHas(who_has);
+
+    auto who_has_message = shared::desktop::core::envelope_io::serialize(who_has_envelope);
+    shared::v1::Envelope decoded_who_has{};
+    QVERIFY(shared::desktop::core::envelope_io::try_read_message(who_has_message, decoded_who_has, error_message));
+    QVERIFY2(error_message.isEmpty(), qPrintable(error_message));
+    QVERIFY(decoded_who_has.hasWhoHas());
+    QVERIFY(decoded_who_has.hasRequestId());
+    QCOMPARE(decoded_who_has.requestId(), static_cast<quint32>(7));
+    QCOMPARE(decoded_who_has.whoHas().destinationPeerId().uuid(), destination_peer_id.uuid());
 }
 
 void sharedcore_tests::configuration_repository_round_trip()

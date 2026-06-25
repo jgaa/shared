@@ -3,6 +3,7 @@
 #include "shared/desktop/core/app_metadata.h"
 
 #include <QtCore/QLoggingCategory>
+#include <QtCore/QStandardPaths>
 
 #include <algorithm>
 
@@ -54,6 +55,84 @@ void settings_repository::set_clipboard_limit_bytes(int value)
     settings.setValue(
         app_metadata::settings_key_clipboard_limit_bytes,
         std::clamp(value, default_clipboard_limit_bytes, maximum_clipboard_limit_bytes));
+    settings.endGroup();
+    settings.sync();
+    ensure_settings_ok(settings, QStringLiteral("Failed to persist settings"));
+}
+
+bool settings_repository::auto_accept_clipboard() const
+{
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store"));
+    settings.beginGroup(app_metadata::settings_group_transfers);
+    const auto value = settings.value(
+        app_metadata::settings_key_auto_accept_clipboard,
+        false).toBool();
+    settings.endGroup();
+    return value;
+}
+
+void settings_repository::set_auto_accept_clipboard(bool value)
+{
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store for write"));
+    settings.beginGroup(app_metadata::settings_group_transfers);
+    settings.setValue(app_metadata::settings_key_auto_accept_clipboard, value);
+    settings.endGroup();
+    settings.sync();
+    ensure_settings_ok(settings, QStringLiteral("Failed to persist settings"));
+}
+
+bool settings_repository::auto_accept_files() const
+{
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store"));
+    settings.beginGroup(app_metadata::settings_group_transfers);
+    const auto value = settings.value(
+        app_metadata::settings_key_auto_accept_files,
+        false).toBool();
+    settings.endGroup();
+    return value;
+}
+
+void settings_repository::set_auto_accept_files(bool value)
+{
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store for write"));
+    settings.beginGroup(app_metadata::settings_group_transfers);
+    settings.setValue(app_metadata::settings_key_auto_accept_files, value);
+    settings.endGroup();
+    settings.sync();
+    ensure_settings_ok(settings, QStringLiteral("Failed to persist settings"));
+}
+
+QString settings_repository::download_path() const
+{
+    const auto default_download_path =
+        QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store"));
+    settings.beginGroup(app_metadata::settings_group_transfers);
+    const auto value = settings.value(
+        app_metadata::settings_key_download_path,
+        default_download_path).toString().trimmed();
+    settings.endGroup();
+    return value.isEmpty() ? default_download_path : value;
+}
+
+void settings_repository::set_download_path(const QString &value)
+{
+    const auto trimmed_value = value.trimmed();
+    const auto default_download_path =
+        QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store for write"));
+    settings.beginGroup(app_metadata::settings_group_transfers);
+    settings.setValue(
+        app_metadata::settings_key_download_path,
+        trimmed_value.isEmpty() ? default_download_path : trimmed_value);
     settings.endGroup();
     settings.sync();
     ensure_settings_ok(settings, QStringLiteral("Failed to persist settings"));

@@ -20,6 +20,9 @@ Dialog {
         trusted_agent_port.value = app_controller.trusted_agent_port
         trusted_agent_peer_port.value = app_controller.trusted_agent_peer_port
         clipboard_limit.value = app_controller.clipboard_limit_megabytes
+        auto_accept_clipboard.checked = app_controller.auto_accept_clipboard
+        auto_accept_files.checked = app_controller.auto_accept_files
+        download_path.text = app_controller.download_path
         log_settings.reload()
     }
 
@@ -136,6 +139,26 @@ Dialog {
                                 to: 8
                                 editable: true
                                 onValueModified: app_controller.clipboard_limit_megabytes = value
+                            }
+
+                            Label { text: "Auto-accept clipboard" }
+                            CheckBox {
+                                id: auto_accept_clipboard
+                                onToggled: app_controller.auto_accept_clipboard = checked
+                            }
+
+                            Label { text: "Auto-accept files" }
+                            CheckBox {
+                                id: auto_accept_files
+                                onToggled: app_controller.auto_accept_files = checked
+                            }
+
+                            Label { text: "Download to" }
+                            TextField {
+                                id: download_path
+                                Layout.fillWidth: true
+                                placeholderText: "Downloads"
+                                onEditingFinished: app_controller.download_path = text
                             }
                         }
                     }

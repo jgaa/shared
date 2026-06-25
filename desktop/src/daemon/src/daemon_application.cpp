@@ -39,6 +39,78 @@ void daemon_application::apply_configuration_change()
     reload_configuration();
 }
 
+bool daemon_application::send_clipboard_text(
+    const QStringList &peer_ids,
+    const QString &text,
+    QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    return peer_service_->send_clipboard_text(peer_ids, text, error_message);
+}
+
+bool daemon_application::send_files(
+    const QStringList &peer_ids,
+    const QStringList &file_paths,
+    QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    return peer_service_->send_files(peer_ids, file_paths, error_message);
+}
+
+bool daemon_application::approve_clipboard_transfer(const QString &transfer_id, QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    return peer_service_->approve_clipboard_transfer(transfer_id, error_message);
+}
+
+bool daemon_application::reject_clipboard_transfer(
+    const QString &transfer_id,
+    const QString &message,
+    QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    return peer_service_->reject_clipboard_transfer(transfer_id, message, error_message);
+}
+
+bool daemon_application::approve_file_transfer(const QString &transfer_id, QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    return peer_service_->approve_file_transfer(transfer_id, error_message);
+}
+
+bool daemon_application::reject_file_transfer(
+    const QString &transfer_id,
+    const QString &message,
+    QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    return peer_service_->reject_file_transfer(transfer_id, message, error_message);
+}
+
 void daemon_application::reload_configuration()
 {
     core::agent_configuration next_configuration{};
@@ -100,6 +172,36 @@ void daemon_application::reload_configuration()
         }
 
         peer_service_ = std::move(next_peer_service);
+        connect(
+            peer_service_.get(),
+            &peer_service::clipboard_approval_requested,
+            this,
+            &daemon_application::clipboard_approval_requested);
+        connect(
+            peer_service_.get(),
+            &peer_service::clipboard_text_received,
+            this,
+            &daemon_application::clipboard_text_received);
+        connect(
+            peer_service_.get(),
+            &peer_service::clipboard_transfer_status,
+            this,
+            &daemon_application::clipboard_transfer_status);
+        connect(
+            peer_service_.get(),
+            &peer_service::file_approval_requested,
+            this,
+            &daemon_application::file_approval_requested);
+        connect(
+            peer_service_.get(),
+            &peer_service::file_received,
+            this,
+            &daemon_application::file_received);
+        connect(
+            peer_service_.get(),
+            &peer_service::file_transfer_status,
+            this,
+            &daemon_application::file_transfer_status);
         qCInfo(shared_daemon_log) << "peer service listening on" << configuration_.peer_host << configuration_.peer_port;
     }
 }

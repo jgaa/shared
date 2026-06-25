@@ -2,24 +2,52 @@
 
 #include "shared/desktop/core/envelope_io.h"
 
+#include <QCoroIODevice>
+#include <QCoroSignal>
+
 #include <QtCore/QDateTime>
+#include <QtCore/QDir>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QFile>
+#include <QtCore/QFileInfo>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QLoggingCategory>
+#include <QtCore/QMimeDatabase>
+#include <QtCore/QRandomGenerator>
 #include <QtCore/QSaveFile>
+#include <QtCore/QTemporaryFile>
 #include <QtCore/QUuid>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QSslConfiguration>
 #include <QtNetwork/QSslKey>
 #include <QtProtobuf/QProtobufSerializer>
 
+#include <limits>
+
 namespace shared::desktop::daemon {
 
 Q_LOGGING_CATEGORY(shared_peer_service_log, "shared.desktop.daemon.peer_service")
 
 namespace {
+
+constexpr quint32 protocol_version{1};
+constexpr quint32 transfer_chunk_size{4 * 1024 * 1024};
+constexpr qsizetype socket_backlog_limit_bytes{2 * 1024 * 1024};
+constexpr qsizetype transfer_queue_limit_bytes{3 * static_cast<qsizetype>(transfer_chunk_size)};
+constexpr auto keepalive_interval_ms{15000};
+constexpr auto address_hint_republish_interval_ms{30000};
+constexpr auto reachability_ttl_ms{90000};
+constexpr auto reachability_broadcast_min_delay_ms{500};
+constexpr auto reachability_broadcast_max_delay_ms{1500};
+
+QString build_numbered_filename(const QString &base_name, const QString &suffix, int index)
+{
+    return suffix.isEmpty()
+        ? QStringLiteral("%1 (%2)").arg(base_name).arg(index)
+        : QStringLiteral("%1 (%2).%3").arg(base_name).arg(index).arg(suffix);
+}
 
 QList<QSslCertificate> load_certificates(const QString &path, QSsl::EncodingFormat format)
 {
@@ -49,7 +77,7 @@ QString socket_address(const QSslSocket &socket)
 shared::v1::Envelope make_envelope(const QString &message_id)
 {
     shared::v1::Envelope envelope{};
-    envelope.setProtocolVersion(1);
+    envelope.setProtocolVersion(protocol_version);
     envelope.setMessageId(message_id);
     return envelope;
 }
@@ -93,6 +121,23 @@ peer_service::peer_service(
 
     connect_timer_.setInterval(3000);
     connect(&connect_timer_, &QTimer::timeout, this, &peer_service::attempt_connections);
+
+    keepalive_timer_.setInterval(keepalive_interval_ms);
+    connect(&keepalive_timer_, &QTimer::timeout, this, &peer_service::send_keepalives);
+
+    address_hint_republish_timer_.setInterval(address_hint_republish_interval_ms);
+    connect(
+        &address_hint_republish_timer_,
+        &QTimer::timeout,
+        this,
+        &peer_service::republish_known_address_hints);
+
+    reachability_broadcast_timer_.setSingleShot(true);
+    connect(
+        &reachability_broadcast_timer_,
+        &QTimer::timeout,
+        this,
+        &peer_service::flush_reachability_broadcast);
 }
 
 bool peer_service::start(QString &error_message)
@@ -114,6 +159,9 @@ bool peer_service::start(QString &error_message)
 
     peer_list_refresh_timer_.start();
     connect_timer_.start();
+    keepalive_timer_.start();
+    address_hint_republish_timer_.start();
+    reachability_broadcast_pending_ = false;
     attempt_connections();
 
     qCInfo(shared_peer_service_log)
@@ -129,6 +177,10 @@ void peer_service::stop()
 {
     peer_list_refresh_timer_.stop();
     connect_timer_.stop();
+    keepalive_timer_.stop();
+    address_hint_republish_timer_.stop();
+    reachability_broadcast_timer_.stop();
+    reachability_broadcast_pending_ = false;
 
     server_.close();
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
@@ -138,8 +190,536 @@ void peer_service::stop()
         }
     }
     sessions_.clear();
+    socket_send_states_.clear();
     pending_connections_.clear();
+    reachability_claims_by_target_.clear();
+    pending_who_has_queries_.clear();
+    for (auto it = incoming_clipboard_transfers_.begin(); it != incoming_clipboard_transfers_.end(); ++it) {
+        if (it.value().approval_timer != nullptr) {
+            it.value().approval_timer->stop();
+            it.value().approval_timer->deleteLater();
+        }
+    }
+    for (auto it = incoming_file_transfers_.begin(); it != incoming_file_transfers_.end(); ++it) {
+        if (it.value().approval_timer != nullptr) {
+            it.value().approval_timer->stop();
+            it.value().approval_timer->deleteLater();
+        }
+        if (!it.value().temp_path.isEmpty()) {
+            QFile::remove(it.value().temp_path);
+        }
+    }
+    incoming_clipboard_transfers_.clear();
+    incoming_file_transfers_.clear();
+    outgoing_clipboard_transfers_.clear();
+    outgoing_file_transfers_.clear();
     write_peer_status_snapshot();
+}
+
+bool peer_service::send_clipboard_text(
+    const QStringList &peer_ids,
+    const QString &text,
+    QString &error_message)
+{
+    const auto plaintext = text.toUtf8();
+    if (plaintext.isEmpty()) {
+        error_message = QStringLiteral("Clipboard text is empty");
+        return false;
+    }
+
+    if (plaintext.size() > settings_repository_.clipboard_limit_bytes()) {
+        error_message = QStringLiteral("Clipboard text exceeds the configured clipboard limit");
+        return false;
+    }
+
+    qCInfo(shared_peer_service_log)
+        << "Sending clipboard text"
+        << "bytes=" << plaintext.size()
+        << "recipients=" << peer_ids.size();
+
+    auto sent_any = false;
+    for (const auto &peer_id : peer_ids) {
+        const auto peer_entry = peer_entry_for_id(peer_id);
+        if (!peer_entry.has_value()) {
+            qCWarning(shared_peer_service_log) << "Skipping clipboard send to unknown peer" << peer_id;
+            continue;
+        }
+
+        const auto transfer_id = QUuid::createUuidV7().toString(QUuid::WithoutBraces).toLower();
+
+        shared::v1::TransferId transfer_id_message{};
+        transfer_id_message.setUuid(transfer_id);
+
+        shared::v1::PeerId sender_peer_id{};
+        sender_peer_id.setUuid(configuration_.peer_id);
+
+        shared::v1::PeerId recipient_peer_id{};
+        recipient_peer_id.setUuid(peer_id);
+
+        shared::v1::TransferMetadata metadata{};
+        metadata.setMimeType(QStringLiteral("text/plain; charset=utf-8"));
+        metadata.setSize(static_cast<quint64>(plaintext.size()));
+        metadata.setSha256(QString::fromLatin1(core::transfer_crypto::sha256_hex(plaintext)));
+        metadata.setChunkSize(4194304);
+        metadata.setChunkCount(1);
+
+        shared::v1::TransferOffer offer{};
+        offer.setTransferId(transfer_id_message);
+        offer.setTransferType(shared::v1::TransferTypeGadget::TransferType::TRANSFER_TYPE_CLIPBOARD_TEXT);
+        offer.setSenderPeerId(sender_peer_id);
+        offer.setRecipientPeerIds({recipient_peer_id});
+        offer.setCreatedTimeMs(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch());
+        offer.setMetadata(metadata);
+
+        shared::v1::TransferChunk chunk{};
+        chunk.setTransferId(transfer_id_message);
+        chunk.setChunkIndex(0);
+        chunk.setOffset(0);
+        chunk.setCiphertext(plaintext);
+
+        outgoing_clipboard_transfer transfer{};
+        transfer.transfer_id = transfer_id;
+        transfer.recipient_peer_id = peer_id;
+        transfer.recipient_name = peer_entry->identity().name();
+        transfer.plaintext = plaintext;
+        transfer.chunk = chunk;
+        outgoing_clipboard_transfers_.insert(transfer_id, transfer);
+
+        auto *socket = authenticated_socket_for_peer(peer_id);
+        if (socket != nullptr) {
+            auto envelope = make_envelope(next_message_id());
+            envelope.setTransferOffer(offer);
+            send_envelope(socket, envelope, QStringLiteral("transfer-offer"));
+            qCInfo(shared_peer_service_log)
+                << "Sent clipboard offer"
+                << "transfer_id=" << transfer_id
+                << "peer_id=" << peer_id
+                << "peer_name=" << peer_entry->identity().name()
+                << "bytes=" << plaintext.size();
+            emit_transfer_status(
+                transfer_id,
+                peer_id,
+                peer_entry->identity().name(),
+                shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
+                QStringLiteral("Clipboard offer sent"));
+            sent_any = true;
+            continue;
+        }
+
+        if (!peer_has_active_reachability_advertiser(peer_id)) {
+            qCWarning(shared_peer_service_log) << "Skipping clipboard send to unreachable peer" << peer_id;
+            clear_outgoing_transfer(transfer_id);
+            continue;
+        }
+
+        qCInfo(shared_peer_service_log)
+            << "Starting relay discovery for clipboard transfer"
+            << "transfer_id=" << transfer_id
+            << "peer_id=" << peer_id
+            << "peer_name=" << peer_entry->identity().name();
+        emit_transfer_status(
+            transfer_id,
+            peer_id,
+            peer_entry->identity().name(),
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
+            QStringLiteral("Searching for relay path"));
+        QCoro::connect(
+            resolve_relay_peer(peer_id, transfer_id),
+            this,
+            [this, transfer_id, peer_id, peer_name = peer_entry->identity().name()](std::optional<QString> relay_peer_id) {
+                if (!outgoing_clipboard_transfers_.contains(transfer_id)) {
+                    return;
+                }
+
+                if (!relay_peer_id.has_value()) {
+                    qCWarning(shared_peer_service_log)
+                        << "Relay discovery failed for clipboard transfer"
+                        << "transfer_id=" << transfer_id
+                        << "peer_id=" << peer_id;
+                    emit_transfer_status(
+                        transfer_id,
+                        peer_id,
+                        peer_name,
+                        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                        QStringLiteral("No relay peer reported a direct route to the recipient"));
+                    clear_outgoing_transfer(transfer_id);
+                    return;
+                }
+
+                qCInfo(shared_peer_service_log)
+                    << "Relay discovered for clipboard transfer"
+                    << "transfer_id=" << transfer_id
+                    << "peer_id=" << peer_id
+                    << "relay_peer_id=" << *relay_peer_id;
+                emit_transfer_status(
+                    transfer_id,
+                    peer_id,
+                    peer_name,
+                    shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                    QStringLiteral("Relay path found via %1, but relay delivery is not implemented yet").arg(*relay_peer_id));
+                clear_outgoing_transfer(transfer_id);
+            });
+        sent_any = true;
+    }
+
+    if (!sent_any) {
+        error_message = QStringLiteral("No selected peers are currently connected or relay-reachable");
+        return false;
+    }
+
+    return true;
+}
+
+bool peer_service::send_files(
+    const QStringList &peer_ids,
+    const QStringList &file_paths,
+    QString &error_message)
+{
+    if (file_paths.isEmpty()) {
+        error_message = QStringLiteral("No files were selected");
+        return false;
+    }
+
+    auto sent_any = false;
+    QMimeDatabase mime_database{};
+    for (const auto &peer_id : peer_ids) {
+        const auto peer_entry = peer_entry_for_id(peer_id);
+        if (!peer_entry.has_value()) {
+            qCWarning(shared_peer_service_log) << "Skipping file send to unknown peer" << peer_id;
+            continue;
+        }
+
+        for (const auto &file_path : file_paths) {
+            QFileInfo file_info{file_path};
+            if (!file_info.exists() || !file_info.isFile()) {
+                qCWarning(shared_peer_service_log) << "Skipping invalid file path" << file_path;
+                continue;
+            }
+
+            QFile file{file_path};
+            if (!file.open(QIODevice::ReadOnly)) {
+                qCWarning(shared_peer_service_log) << "Failed to open file for transfer" << file_path << file.errorString();
+                continue;
+            }
+
+            const auto plaintext = file.readAll();
+            if (plaintext.size() != file.size()) {
+                qCWarning(shared_peer_service_log) << "Failed to read complete file for transfer" << file_path << file.errorString();
+                continue;
+            }
+
+            QString crypto_error{};
+            const auto payload_key = core::transfer_crypto::random_bytes(
+                core::transfer_crypto::payload_key_size,
+                crypto_error);
+            if (payload_key.isEmpty()) {
+                qCCritical(shared_peer_service_log) << "Failed to create payload key for file transfer" << file_path << crypto_error;
+                continue;
+            }
+
+            const auto wrapped_key = payload_key_for_recipient(peer_id, payload_key, crypto_error);
+            if (wrapped_key.isEmpty()) {
+                qCCritical(shared_peer_service_log)
+                    << "Failed to wrap file payload key"
+                    << "peer_id=" << peer_id
+                    << "file=" << file_path
+                    << crypto_error;
+                continue;
+            }
+
+            const auto transfer_id = QUuid::createUuidV7().toString(QUuid::WithoutBraces).toLower();
+
+            shared::v1::TransferId transfer_id_message{};
+            transfer_id_message.setUuid(transfer_id);
+
+            shared::v1::PeerId sender_peer_id{};
+            sender_peer_id.setUuid(configuration_.peer_id);
+
+            shared::v1::PeerId recipient_peer_id{};
+            recipient_peer_id.setUuid(peer_id);
+
+            shared::v1::RecipientKey recipient_key{};
+            recipient_key.setPeerId(recipient_peer_id);
+            recipient_key.setEncryptedKey(wrapped_key);
+            recipient_key.setKeyAlgorithm(QStringLiteral("x25519-hkdf-sha256"));
+
+            shared::v1::TransferMetadata metadata{};
+            metadata.setFilename(file_info.fileName());
+            metadata.setMimeType(mime_database.mimeTypeForFile(file_info).name());
+            metadata.setSize(static_cast<quint64>(file_info.size()));
+            metadata.setSha256(QString::fromLatin1(core::transfer_crypto::sha256_hex(plaintext)));
+            metadata.setChunkSize(transfer_chunk_size);
+            metadata.setChunkCount(
+                static_cast<quint64>((file_info.size() + transfer_chunk_size - 1) / transfer_chunk_size));
+
+            shared::v1::TransferOffer offer{};
+            offer.setTransferId(transfer_id_message);
+            offer.setTransferType(shared::v1::TransferTypeGadget::TransferType::TRANSFER_TYPE_FILE);
+            offer.setSenderPeerId(sender_peer_id);
+            offer.setRecipientPeerIds({recipient_peer_id});
+            offer.setCreatedTimeMs(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch());
+            offer.setMetadata(metadata);
+            offer.setRecipientKeys({recipient_key});
+
+            outgoing_file_transfer transfer{};
+            transfer.transfer_id = transfer_id;
+            transfer.recipient_peer_id = peer_id;
+            transfer.recipient_name = peer_entry->identity().name();
+            transfer.file_path = file_path;
+            transfer.filename = file_info.fileName();
+            transfer.mime_type = metadata.mimeType();
+            transfer.payload_key = payload_key;
+            transfer.expected_sha256 = metadata.sha256().toLatin1();
+            transfer.expected_size = metadata.size();
+            transfer.chunk_count = metadata.chunkCount();
+            outgoing_file_transfers_.insert(transfer_id, transfer);
+
+            auto *socket = authenticated_socket_for_peer(peer_id);
+            if (socket != nullptr) {
+                auto envelope = make_envelope(next_message_id());
+                envelope.setTransferOffer(offer);
+                send_envelope(socket, envelope, QStringLiteral("transfer-offer"), outbound_priority::normal);
+                emit_file_transfer_status(
+                    transfer_id,
+                    peer_id,
+                    peer_entry->identity().name(),
+                    shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
+                    QStringLiteral("File offer sent"));
+                qCInfo(shared_peer_service_log)
+                    << "Sent file offer"
+                    << "transfer_id=" << transfer_id
+                    << "peer_id=" << peer_id
+                    << "peer_name=" << peer_entry->identity().name()
+                    << "file=" << file_path
+                    << "bytes=" << file_info.size();
+                sent_any = true;
+                continue;
+            }
+
+            if (!peer_has_active_reachability_advertiser(peer_id)) {
+                qCWarning(shared_peer_service_log) << "Skipping file send to unreachable peer" << peer_id << file_path;
+                clear_outgoing_file_transfer(transfer_id);
+                continue;
+            }
+
+            qCInfo(shared_peer_service_log)
+                << "Starting relay discovery for file transfer"
+                << "transfer_id=" << transfer_id
+                << "peer_id=" << peer_id
+                << "peer_name=" << peer_entry->identity().name()
+                << "file=" << file_path;
+            emit_file_transfer_status(
+                transfer_id,
+                peer_id,
+                peer_entry->identity().name(),
+                shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
+                QStringLiteral("Searching for relay path"));
+            QCoro::connect(
+                resolve_relay_peer(peer_id, transfer_id),
+                this,
+                [this, transfer_id, peer_id, peer_name = peer_entry->identity().name()](std::optional<QString> relay_peer_id) {
+                    if (!outgoing_file_transfers_.contains(transfer_id)) {
+                        return;
+                    }
+
+                    if (!relay_peer_id.has_value()) {
+                        qCWarning(shared_peer_service_log)
+                            << "Relay discovery failed for file transfer"
+                            << "transfer_id=" << transfer_id
+                            << "peer_id=" << peer_id;
+                        emit_file_transfer_status(
+                            transfer_id,
+                            peer_id,
+                            peer_name,
+                            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                            QStringLiteral("No relay peer reported a direct route to the recipient"));
+                        clear_outgoing_file_transfer(transfer_id);
+                        return;
+                    }
+
+                    qCInfo(shared_peer_service_log)
+                        << "Relay discovered for file transfer"
+                        << "transfer_id=" << transfer_id
+                        << "peer_id=" << peer_id
+                        << "relay_peer_id=" << *relay_peer_id;
+                    emit_file_transfer_status(
+                        transfer_id,
+                        peer_id,
+                        peer_name,
+                        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                        QStringLiteral("Relay path found via %1, but relay delivery is not implemented yet").arg(*relay_peer_id));
+                    clear_outgoing_file_transfer(transfer_id);
+                });
+            sent_any = true;
+        }
+    }
+
+    if (!sent_any) {
+        error_message = QStringLiteral("No selected peers are currently connected or relay-reachable");
+        return false;
+    }
+
+    return true;
+}
+
+bool peer_service::approve_clipboard_transfer(const QString &transfer_id, QString &error_message)
+{
+    auto transfer_it = incoming_clipboard_transfers_.find(transfer_id);
+    if (transfer_it == incoming_clipboard_transfers_.end()) {
+        error_message = QStringLiteral("Incoming clipboard transfer no longer exists");
+        return false;
+    }
+
+    auto *socket = authenticated_socket_for_peer(transfer_it->sender_peer_id);
+    if (socket == nullptr) {
+        error_message = QStringLiteral("Sender is no longer connected");
+        clear_incoming_transfer(transfer_id);
+        return false;
+    }
+
+    transfer_it->approved = true;
+    if (transfer_it->approval_timer != nullptr) {
+        transfer_it->approval_timer->stop();
+        transfer_it->approval_timer->deleteLater();
+        transfer_it->approval_timer = nullptr;
+    }
+
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSPECIFIED,
+        QStringLiteral("Clipboard transfer approved"));
+    qCInfo(shared_peer_service_log)
+        << "Approved incoming clipboard transfer"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << transfer_it->sender_peer_id
+        << "sender_name=" << transfer_it->sender_name;
+    emit clipboard_transfer_status(
+        transfer_id,
+        transfer_it->sender_peer_id,
+        transfer_it->sender_name,
+        static_cast<int>(shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED),
+        QStringLiteral("Clipboard transfer approved"));
+    return true;
+}
+
+bool peer_service::reject_clipboard_transfer(
+    const QString &transfer_id,
+    const QString &message,
+    QString &error_message)
+{
+    auto transfer_it = incoming_clipboard_transfers_.find(transfer_id);
+    if (transfer_it == incoming_clipboard_transfers_.end()) {
+        error_message = QStringLiteral("Incoming clipboard transfer no longer exists");
+        return false;
+    }
+
+    auto *socket = authenticated_socket_for_peer(transfer_it->sender_peer_id);
+    if (socket != nullptr) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_REJECTED,
+            message);
+    }
+
+    qCInfo(shared_peer_service_log)
+        << "Rejected incoming clipboard transfer"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << transfer_it->sender_peer_id
+        << "sender_name=" << transfer_it->sender_name
+        << "message=" << message;
+    emit clipboard_transfer_status(
+        transfer_id,
+        transfer_it->sender_peer_id,
+        transfer_it->sender_name,
+        static_cast<int>(shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED),
+        message);
+    clear_incoming_transfer(transfer_id);
+    return true;
+}
+
+bool peer_service::approve_file_transfer(const QString &transfer_id, QString &error_message)
+{
+    auto transfer_it = incoming_file_transfers_.find(transfer_id);
+    if (transfer_it == incoming_file_transfers_.end()) {
+        error_message = QStringLiteral("Incoming file transfer no longer exists");
+        return false;
+    }
+
+    auto *socket = authenticated_socket_for_peer(transfer_it->sender_peer_id);
+    if (socket == nullptr) {
+        error_message = QStringLiteral("Sender is no longer connected");
+        clear_incoming_file_transfer(transfer_id);
+        return false;
+    }
+
+    transfer_it->approved = true;
+    if (transfer_it->approval_timer != nullptr) {
+        transfer_it->approval_timer->stop();
+        transfer_it->approval_timer->deleteLater();
+        transfer_it->approval_timer = nullptr;
+    }
+
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSPECIFIED,
+        QStringLiteral("File transfer approved"));
+    emit file_transfer_status(
+        transfer_id,
+        transfer_it->sender_peer_id,
+        transfer_it->sender_name,
+        static_cast<int>(shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED),
+        QStringLiteral("File transfer approved"));
+    qCInfo(shared_peer_service_log)
+        << "Approved incoming file transfer"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << transfer_it->sender_peer_id
+        << "sender_name=" << transfer_it->sender_name
+        << "filename=" << transfer_it->filename;
+    return true;
+}
+
+bool peer_service::reject_file_transfer(
+    const QString &transfer_id,
+    const QString &message,
+    QString &error_message)
+{
+    auto transfer_it = incoming_file_transfers_.find(transfer_id);
+    if (transfer_it == incoming_file_transfers_.end()) {
+        error_message = QStringLiteral("Incoming file transfer no longer exists");
+        return false;
+    }
+
+    auto *socket = authenticated_socket_for_peer(transfer_it->sender_peer_id);
+    if (socket != nullptr) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_REJECTED,
+            message);
+    }
+
+    emit file_transfer_status(
+        transfer_id,
+        transfer_it->sender_peer_id,
+        transfer_it->sender_name,
+        static_cast<int>(shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED),
+        message);
+    qCInfo(shared_peer_service_log)
+        << "Rejected incoming file transfer"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << transfer_it->sender_peer_id
+        << "sender_name=" << transfer_it->sender_name
+        << "filename=" << transfer_it->filename
+        << "message=" << message;
+    clear_incoming_file_transfer(transfer_id);
+    return true;
 }
 
 void peer_service::handle_pending_connection()
@@ -208,6 +788,54 @@ void peer_service::attempt_connections()
         }
 
         maybe_connect_to_peer(peer, addresses);
+    }
+}
+
+void peer_service::send_keepalives()
+{
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (!it.value().authenticated) {
+            continue;
+        }
+
+        send_keepalive(it.key());
+    }
+}
+
+void peer_service::republish_known_address_hints()
+{
+    auto sent_any = false;
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (!it.value().authenticated) {
+            continue;
+        }
+
+        send_known_address_hints(it.key());
+        sent_any = true;
+    }
+
+    if (sent_any) {
+        qCInfo(shared_peer_service_log) << "republished known address hints";
+        flush_reachability_broadcast();
+    }
+}
+
+void peer_service::flush_reachability_broadcast()
+{
+    reachability_broadcast_pending_ = false;
+
+    auto sent_any = false;
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (!it.value().authenticated) {
+            continue;
+        }
+
+        send_current_reachability(it.key());
+        sent_any = true;
+    }
+
+    if (sent_any) {
+        qCInfo(shared_peer_service_log) << "broadcasted direct reachability snapshot";
     }
 }
 
@@ -335,12 +963,22 @@ QString peer_service::next_connection_id() const
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
+quint32 peer_service::next_request_id()
+{
+    if (next_request_id_ == 0) {
+        next_request_id_ = 1;
+    }
+
+    return next_request_id_++;
+}
+
 void peer_service::attach_socket(QSslSocket *socket, bool outbound)
 {
     session_state session{};
     session.outbound = outbound;
     session.local_connection_id = next_connection_id();
     sessions_.insert(socket, session);
+    socket_send_states_.insert(socket, {});
 
     connect(socket, &QSslSocket::readyRead, this, [this, socket]() {
         handle_socket_ready_read(socket);
@@ -376,6 +1014,7 @@ void peer_service::close_socket(QSslSocket *socket, const QString &reason)
         << "address=" << socket->peerAddress().toString()
         << "port=" << socket->peerPort()
         << "reason=" << reason;
+    socket_send_states_.remove(socket);
     socket->disconnectFromHost();
 }
 
@@ -411,7 +1050,7 @@ void peer_service::send_local_peer_info(QSslSocket *socket)
 
     auto envelope = make_envelope(next_message_id());
     envelope.setPeerInfo(peer_info);
-    send_envelope(socket, envelope, QStringLiteral("peer-info"));
+    send_envelope(socket, envelope, QStringLiteral("peer-info"), outbound_priority::high);
     session_it->peer_info_sent = true;
 }
 
@@ -427,7 +1066,7 @@ void peer_service::send_current_peer_list(QSslSocket *socket)
 
     auto envelope = make_envelope(next_message_id());
     envelope.setPeerList(peer_list);
-    send_envelope(socket, envelope, QStringLiteral("peer-list"));
+    send_envelope(socket, envelope, QStringLiteral("peer-list"), outbound_priority::high);
 }
 
 void peer_service::send_known_address_hints(QSslSocket *socket)
@@ -447,8 +1086,44 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 
         auto envelope = make_envelope(next_message_id());
         envelope.setAddressHint(address_hint);
-        send_envelope(socket, envelope, QStringLiteral("address-hint"));
+        send_envelope(socket, envelope, QStringLiteral("address-hint"), outbound_priority::normal);
     }
+}
+
+void peer_service::send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms)
+{
+    shared::v1::KeepAlive keep_alive{};
+    keep_alive.setTimeMs(static_cast<quint64>(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()));
+    if (reply_to_time_ms != 0) {
+        keep_alive.setReplyToTimeMs(reply_to_time_ms);
+    }
+
+    auto envelope = make_envelope(next_message_id());
+    envelope.setKeepAlive(keep_alive);
+    send_envelope(socket, envelope, QStringLiteral("keep-alive"), outbound_priority::high);
+}
+
+void peer_service::send_current_reachability(QSslSocket *socket)
+{
+    shared::v1::PeerId advertiser_peer_id{};
+    advertiser_peer_id.setUuid(configuration_.peer_id);
+
+    QList<shared::v1::PeerId> reachable_peer_ids{};
+    for (const auto &peer_id : current_directly_connected_peer_ids()) {
+        shared::v1::PeerId reachable_peer_id{};
+        reachable_peer_id.setUuid(peer_id);
+        reachable_peer_ids.append(reachable_peer_id);
+    }
+
+    shared::v1::ReachabilityAdvertisement advertisement{};
+    advertisement.setAdvertiserPeerId(advertiser_peer_id);
+    advertisement.setDirectlyReachablePeerIds(reachable_peer_ids);
+    advertisement.setCreatedTimeMs(static_cast<quint64>(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()));
+    advertisement.setTtlMs(reachability_ttl_ms);
+
+    auto envelope = make_envelope(next_message_id());
+    envelope.setReachabilityAdvertisement(advertisement);
+    send_envelope(socket, envelope, QStringLiteral("reachability-advertisement"), outbound_priority::normal);
 }
 
 void peer_service::broadcast_peer_list(QSslSocket *exclude_socket)
@@ -470,15 +1145,21 @@ void peer_service::broadcast_address_hint(const shared::v1::AddressHint &hint, Q
 
         auto envelope = make_envelope(next_message_id());
         envelope.setAddressHint(hint);
-        send_envelope(it.key(), envelope, QStringLiteral("address-hint"));
+        send_envelope(it.key(), envelope, QStringLiteral("address-hint"), outbound_priority::normal);
     }
 }
 
 void peer_service::send_envelope(
     QSslSocket *socket,
     const shared::v1::Envelope &envelope,
-    const QString &context)
+    const QString &context,
+    outbound_priority priority)
 {
+    if (socket == nullptr || !sessions_.contains(socket)) {
+        qCWarning(shared_peer_service_log) << "Dropping" << context << "for missing socket";
+        return;
+    }
+
     const auto bytes = core::envelope_io::serialize(envelope);
     qCInfo(shared_peer_service_log)
         << "sending"
@@ -486,14 +1167,7 @@ void peer_service::send_envelope(
         << "message_id=" << envelope.messageId()
         << "bytes=" << bytes.size()
         << "peer=" << sessions_.value(socket).remote_peer_id;
-    if (socket->write(bytes) != bytes.size()) {
-        qCCritical(shared_peer_service_log) << "Failed to queue" << context << socket->errorString();
-        close_socket(socket, QStringLiteral("Failed to queue %1").arg(context));
-        return;
-    }
-    if (!socket->flush()) {
-        qCWarning(shared_peer_service_log) << "Failed to flush" << context << socket->errorString();
-    }
+    enqueue_frame(socket, {.bytes = bytes, .context = context, .message_id = envelope.messageId(), .priority = priority});
     note_peer_activity(socket);
 }
 
@@ -515,6 +1189,11 @@ void peer_service::note_peer_activity(QSslSocket *socket)
 
 void peer_service::write_peer_status_snapshot()
 {
+    const auto claims_changed = purge_expired_reachability_claims();
+    if (claims_changed) {
+        qCInfo(shared_peer_service_log) << "Purged expired reachability claims";
+    }
+
     QString error_message{};
     const auto peer_list = load_current_peer_list(error_message);
     if (!error_message.isEmpty()) {
@@ -523,13 +1202,6 @@ void peer_service::write_peer_status_snapshot()
     }
 
     const auto all_addresses = address_hint_repository_.load_all();
-
-    auto connected_peer_count = 0;
-    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.value().authenticated) {
-            ++connected_peer_count;
-        }
-    }
 
     QJsonArray peers{};
     for (const auto &entry : peer_list.peers()) {
@@ -568,7 +1240,9 @@ void peer_service::write_peer_status_snapshot()
         const auto runtime_state = peer_runtime_states_.value(peer_id);
         const auto has_direct_address = !known_addresses.isEmpty();
         const auto has_runtime_address = !runtime_state.last_ip.isEmpty() && runtime_state.last_port != 0;
-        const auto relay_available = !connected && connected_peer_count > 0 && !has_direct_address && !has_runtime_address;
+        const auto relay_available =
+            !connected
+            && peer_has_active_reachability_advertiser(peer_id);
 
         if (!connected && has_direct_address) {
             address = known_addresses.first().ip();
@@ -658,9 +1332,62 @@ void peer_service::handle_socket_ready_read(QSslSocket *socket)
             continue;
         }
 
+        if (envelope.hasReachabilityAdvertisement()) {
+            qCInfo(shared_peer_service_log) << "received reachability-advertisement" << envelope.messageId();
+            note_peer_activity(socket);
+            handle_reachability_advertisement(socket, envelope.reachabilityAdvertisement());
+            continue;
+        }
+
+        if (envelope.hasWhoHas()) {
+            qCInfo(shared_peer_service_log) << "received who-has" << envelope.messageId() << envelope.requestId();
+            note_peer_activity(socket);
+            if (!envelope.hasRequestId() || envelope.requestId() == 0) {
+                qCWarning(shared_peer_service_log) << "Ignoring who-has without request id" << envelope.messageId();
+                continue;
+            }
+            handle_who_has(socket, envelope.requestId(), envelope.whoHas());
+            continue;
+        }
+
+        if (envelope.hasWhoHasReply()) {
+            qCInfo(shared_peer_service_log) << "received who-has-reply" << envelope.messageId() << envelope.requestId();
+            note_peer_activity(socket);
+            if (!envelope.hasRequestId() || envelope.requestId() == 0) {
+                qCWarning(shared_peer_service_log) << "Ignoring who-has reply without request id" << envelope.messageId();
+                continue;
+            }
+            handle_who_has_reply(socket, envelope.requestId(), envelope.whoHasReply());
+            continue;
+        }
+
         if (envelope.hasKeepAlive()) {
             qCInfo(shared_peer_service_log) << "received keep-alive" << envelope.messageId();
             note_peer_activity(socket);
+            if (envelope.keepAlive().replyToTimeMs() == 0) {
+                send_keepalive(socket, envelope.keepAlive().timeMs());
+            }
+            continue;
+        }
+
+        if (envelope.hasTransferOffer()) {
+            qCInfo(shared_peer_service_log) << "received transfer-offer" << envelope.messageId();
+            note_peer_activity(socket);
+            handle_transfer_offer(socket, envelope.transferOffer());
+            continue;
+        }
+
+        if (envelope.hasTransferStatus()) {
+            qCInfo(shared_peer_service_log) << "received transfer-status" << envelope.messageId();
+            note_peer_activity(socket);
+            handle_transfer_status(socket, envelope.transferStatus());
+            continue;
+        }
+
+        if (envelope.hasTransferChunk()) {
+            qCInfo(shared_peer_service_log) << "received transfer-chunk" << envelope.messageId();
+            note_peer_activity(socket);
+            handle_transfer_chunk(socket, envelope.transferChunk());
             continue;
         }
 
@@ -723,6 +1450,7 @@ void peer_service::handle_ssl_errors(QSslSocket *socket, const QList<QSslError> 
 void peer_service::handle_disconnected(QSslSocket *socket)
 {
     const auto session = sessions_.take(socket);
+    socket_send_states_.remove(socket);
     if (session.outbound && !session.target_peer_id.isEmpty()) {
         pending_connections_.remove(session.target_peer_id);
     }
@@ -735,6 +1463,10 @@ void peer_service::handle_disconnected(QSslSocket *socket)
             runtime_state.last_port = session.remote_listen_port == 0
                 ? static_cast<quint16>(socket->peerPort())
                 : session.remote_listen_port;
+        }
+        if (session.authenticated) {
+            clear_reachability_claims_for_advertiser(session.remote_peer_id);
+            schedule_reachability_broadcast();
         }
     }
 
@@ -811,6 +1543,8 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
     write_peer_status_snapshot();
     send_local_peer_info(socket);
     send_known_address_hints(socket);
+    send_current_reachability(socket);
+    schedule_reachability_broadcast();
 
     if (current_peer_list_version_ >= peer_info.peerListVersion()) {
         send_current_peer_list(socket);
@@ -847,6 +1581,746 @@ void peer_service::handle_address_hint(QSslSocket *socket, const shared::v1::Add
     }
 
     merge_claimed_addresses(address_hint.peerId().uuid(), address_hint.addresses(), socket);
+}
+
+void peer_service::handle_reachability_advertisement(
+    QSslSocket *socket,
+    const shared::v1::ReachabilityAdvertisement &advertisement)
+{
+    const auto session = sessions_.value(socket);
+    if (!session.authenticated || session.remote_peer_id.isEmpty()) {
+        qCWarning(shared_peer_service_log) << "Ignoring reachability advertisement from unauthenticated peer";
+        return;
+    }
+
+    if (!advertisement.hasAdvertiserPeerId()
+        || advertisement.advertiserPeerId().uuid().trimmed().isEmpty()) {
+        qCWarning(shared_peer_service_log) << "Ignoring reachability advertisement without advertiser id";
+        return;
+    }
+
+    const auto advertiser_peer_id = advertisement.advertiserPeerId().uuid().trimmed();
+    if (advertiser_peer_id != session.remote_peer_id) {
+        qCWarning(shared_peer_service_log)
+            << "Ignoring reachability advertisement with mismatched advertiser id"
+            << "expected=" << session.remote_peer_id
+            << "actual=" << advertiser_peer_id;
+        return;
+    }
+
+    clear_reachability_claims_for_advertiser(advertiser_peer_id);
+
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    const auto ttl_ms = qBound<qint64>(
+        static_cast<qint64>(1000),
+        static_cast<qint64>(advertisement.ttlMs()),
+        static_cast<qint64>(reachability_ttl_ms));
+    for (const auto &reachable_peer_id : advertisement.directlyReachablePeerIds()) {
+        const auto target_peer_id = reachable_peer_id.uuid().trimmed();
+        if (target_peer_id.isEmpty()
+            || target_peer_id == advertiser_peer_id
+            || target_peer_id == configuration_.peer_id) {
+            continue;
+        }
+
+        reachability_claim claim{};
+        claim.expiry_time_ms = now_ms + ttl_ms;
+        reachability_claims_by_target_[target_peer_id].insert(advertiser_peer_id, claim);
+    }
+
+    [[maybe_unused]] const auto claims_changed = purge_expired_reachability_claims();
+    write_peer_status_snapshot();
+}
+
+void peer_service::handle_who_has(
+    QSslSocket *socket,
+    quint32 request_id,
+    const shared::v1::WhoHas &who_has)
+{
+    if (!who_has.hasDestinationPeerId() || who_has.destinationPeerId().uuid().trimmed().isEmpty()) {
+        qCWarning(shared_peer_service_log) << "Ignoring who-has without destination peer id" << request_id;
+        return;
+    }
+
+    const auto destination_peer_id = who_has.destinationPeerId().uuid().trimmed();
+    const auto reachable = authenticated_socket_for_peer(destination_peer_id) != nullptr;
+
+    shared::v1::PeerId destination_peer_id_message{};
+    destination_peer_id_message.setUuid(destination_peer_id);
+
+    shared::v1::WhoHasReply reply{};
+    reply.setDestinationPeerId(destination_peer_id_message);
+    reply.setReachable(reachable);
+    if (reachable) {
+        shared::v1::PeerId relay_peer_id{};
+        relay_peer_id.setUuid(configuration_.peer_id);
+        reply.setRelayPeerId(relay_peer_id);
+    }
+    reply.setRttMs(0);
+
+    auto envelope = make_envelope(next_message_id());
+    envelope.setRequestId(request_id);
+    envelope.setWhoHasReply(reply);
+    send_envelope(socket, envelope, QStringLiteral("who-has-reply"), outbound_priority::high);
+    qCInfo(shared_peer_service_log)
+        << "Answered who-has"
+        << "request_id=" << request_id
+        << "destination_peer_id=" << destination_peer_id
+        << "reachable=" << reachable;
+}
+
+void peer_service::handle_who_has_reply(
+    QSslSocket *socket,
+    quint32 request_id,
+    const shared::v1::WhoHasReply &who_has_reply)
+{
+    auto pending_it = pending_who_has_queries_.find(request_id);
+    if (pending_it == pending_who_has_queries_.end()) {
+        qCInfo(shared_peer_service_log) << "Ignoring who-has reply for unknown request" << request_id;
+        return;
+    }
+
+    if (!who_has_reply.hasDestinationPeerId()
+        || who_has_reply.destinationPeerId().uuid().trimmed() != pending_it->destination_peer_id) {
+        qCWarning(shared_peer_service_log)
+            << "Ignoring who-has reply with mismatched destination"
+            << "request_id=" << request_id
+            << "expected=" << pending_it->destination_peer_id
+            << "actual=" << who_has_reply.destinationPeerId().uuid().trimmed();
+        return;
+    }
+
+    const auto remote_peer_id = sessions_.value(socket).remote_peer_id.trimmed();
+    if (remote_peer_id.isEmpty()) {
+        qCWarning(shared_peer_service_log) << "Ignoring who-has reply from unauthenticated peer" << request_id;
+        return;
+    }
+
+    const auto relay_peer_id = who_has_reply.relayPeerId().uuid().trimmed();
+    if (who_has_reply.reachable() && relay_peer_id != remote_peer_id) {
+        qCWarning(shared_peer_service_log)
+            << "Ignoring who-has reply with mismatched relay peer id"
+            << "request_id=" << request_id
+            << "expected=" << remote_peer_id
+            << "actual=" << relay_peer_id;
+        return;
+    }
+
+    who_has_reply_state reply_state{};
+    reply_state.reachable = who_has_reply.reachable();
+    reply_state.relay_peer_id = remote_peer_id;
+    reply_state.rtt_ms = who_has_reply.rttMs();
+    pending_it->replies_by_relay_peer_id.insert(remote_peer_id, reply_state);
+    emit who_has_query_progressed(request_id);
+    qCInfo(shared_peer_service_log)
+        << "Recorded who-has reply"
+        << "request_id=" << request_id
+        << "destination_peer_id=" << pending_it->destination_peer_id
+        << "relay_peer_id=" << remote_peer_id
+        << "reachable=" << who_has_reply.reachable();
+}
+
+void peer_service::handle_transfer_offer(QSslSocket *socket, const shared::v1::TransferOffer &transfer_offer)
+{
+    if (!transfer_offer.hasTransferId() || transfer_offer.transferId().uuid().isEmpty()) {
+        close_socket(socket, QStringLiteral("Transfer offer is missing transfer id"));
+        return;
+    }
+
+    const auto transfer_id = transfer_offer.transferId().uuid();
+    const auto sender_peer_id = transfer_offer.senderPeerId().uuid();
+    const auto session = sessions_.value(socket);
+    qCInfo(shared_peer_service_log)
+        << "Received transfer offer"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << sender_peer_id
+        << "type=" << static_cast<int>(transfer_offer.transferType());
+    if (sender_peer_id.isEmpty() || sender_peer_id != session.remote_peer_id) {
+        close_socket(socket, QStringLiteral("Transfer offer sender does not match authenticated peer"));
+        return;
+    }
+
+    switch (transfer_offer.transferType()) {
+    case shared::v1::TransferTypeGadget::TransferType::TRANSFER_TYPE_CLIPBOARD_TEXT:
+        handle_clipboard_transfer_offer(socket, transfer_offer);
+        return;
+    case shared::v1::TransferTypeGadget::TransferType::TRANSFER_TYPE_FILE:
+        handle_file_transfer_offer(socket, transfer_offer);
+        return;
+    default:
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSUPPORTED,
+            QStringLiteral("Unsupported transfer type"));
+        return;
+    }
+}
+
+void peer_service::handle_transfer_status(QSslSocket *socket, const shared::v1::TransferStatus &transfer_status)
+{
+    if (!transfer_status.hasTransferId() || transfer_status.transferId().uuid().isEmpty()) {
+        close_socket(socket, QStringLiteral("Transfer status is missing transfer id"));
+        return;
+    }
+
+    const auto transfer_id = transfer_status.transferId().uuid();
+    auto transfer_it = outgoing_clipboard_transfers_.find(transfer_id);
+    if (transfer_it != outgoing_clipboard_transfers_.end()) {
+        emit_transfer_status(
+            transfer_id,
+            transfer_it->recipient_peer_id,
+            transfer_it->recipient_name,
+            transfer_status.status(),
+            transfer_status.message());
+        qCInfo(shared_peer_service_log)
+            << "Received clipboard transfer status"
+            << "transfer_id=" << transfer_id
+            << "peer_id=" << transfer_it->recipient_peer_id
+            << "peer_name=" << transfer_it->recipient_name
+            << "status=" << static_cast<int>(transfer_status.status())
+            << "message=" << transfer_status.message();
+
+        switch (transfer_status.status()) {
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED: {
+            auto envelope = make_envelope(next_message_id());
+            envelope.setTransferChunk(transfer_it->chunk);
+            send_envelope(socket, envelope, QStringLiteral("transfer-chunk"), outbound_priority::low);
+            transfer_it->chunk_sent = true;
+            break;
+        }
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL:
+            break;
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_CANCELLED:
+            clear_outgoing_transfer(transfer_id);
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    auto file_transfer_it = outgoing_file_transfers_.find(transfer_id);
+    if (file_transfer_it == outgoing_file_transfers_.end()) {
+        qCWarning(shared_peer_service_log) << "Ignoring transfer status for unknown outgoing transfer" << transfer_id;
+        return;
+    }
+
+    emit_file_transfer_status(
+        transfer_id,
+        file_transfer_it->recipient_peer_id,
+        file_transfer_it->recipient_name,
+        transfer_status.status(),
+        transfer_status.message());
+    qCInfo(shared_peer_service_log)
+        << "Received file transfer status"
+        << "transfer_id=" << transfer_id
+        << "peer_id=" << file_transfer_it->recipient_peer_id
+        << "peer_name=" << file_transfer_it->recipient_name
+        << "status=" << static_cast<int>(transfer_status.status())
+        << "message=" << transfer_status.message();
+
+    switch (transfer_status.status()) {
+    case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED:
+        start_outgoing_file_transfer(transfer_id);
+        break;
+    case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL:
+        break;
+    case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED:
+    case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED:
+    case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR:
+    case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_CANCELLED:
+        clear_outgoing_file_transfer(transfer_id);
+        break;
+    default:
+        break;
+    }
+}
+
+void peer_service::handle_transfer_chunk(QSslSocket *socket, const shared::v1::TransferChunk &transfer_chunk)
+{
+    if (!transfer_chunk.hasTransferId() || transfer_chunk.transferId().uuid().isEmpty()) {
+        close_socket(socket, QStringLiteral("Transfer chunk is missing transfer id"));
+        return;
+    }
+
+    const auto transfer_id = transfer_chunk.transferId().uuid();
+    auto transfer_it = incoming_clipboard_transfers_.find(transfer_id);
+    if (transfer_it != incoming_clipboard_transfers_.end()) {
+        handle_clipboard_transfer_chunk(socket, transfer_chunk);
+        return;
+    }
+
+    if (incoming_file_transfers_.contains(transfer_id)) {
+        handle_file_transfer_chunk(socket, transfer_chunk);
+        return;
+    }
+
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+        QStringLiteral("Transfer chunk arrived for unknown transfer"));
+}
+
+void peer_service::handle_clipboard_transfer_offer(
+    QSslSocket *socket,
+    const shared::v1::TransferOffer &transfer_offer)
+{
+    if (!transfer_offer.hasMetadata()) {
+        send_transfer_status(
+            socket,
+            transfer_offer.transferId().uuid(),
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("Clipboard transfer is missing metadata"));
+        return;
+    }
+
+    const auto transfer_id = transfer_offer.transferId().uuid();
+    const auto sender_peer_id = transfer_offer.senderPeerId().uuid();
+    const auto size = transfer_offer.metadata().size();
+    if (size == 0 || size > static_cast<quint64>(settings_repository_.clipboard_limit_bytes())) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_REJECTED,
+            QStringLiteral("Clipboard transfer exceeds receiver limit"));
+        return;
+    }
+
+    const auto sender_entry = peer_entry_for_id(sender_peer_id);
+    if (!sender_entry.has_value()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("Sender is missing from signed peer list"));
+        return;
+    }
+
+    incoming_clipboard_transfer transfer{};
+    transfer.transfer_id = transfer_id;
+    transfer.sender_peer_id = sender_peer_id;
+    transfer.sender_name = sender_entry->identity().name();
+    transfer.expected_sha256 = transfer_offer.metadata().sha256().toLatin1();
+    transfer.expected_size = size;
+    incoming_clipboard_transfers_.insert(transfer_id, transfer);
+
+    if (settings_repository_.auto_accept_clipboard()) {
+        qCInfo(shared_peer_service_log)
+            << "Auto-accepting clipboard offer"
+            << "transfer_id=" << transfer_id
+            << "sender_peer_id=" << sender_peer_id
+            << "sender_name=" << transfer.sender_name;
+        QString approve_error{};
+        if (!approve_clipboard_transfer(transfer_id, approve_error)) {
+            send_transfer_status(
+                socket,
+                transfer_id,
+                shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+                approve_error);
+        }
+        return;
+    }
+
+    auto &stored_transfer = incoming_clipboard_transfers_[transfer_id];
+    stored_transfer.approval_timer = new QTimer{this};
+    stored_transfer.approval_timer->setSingleShot(true);
+    stored_transfer.approval_timer->setInterval(3 * 60 * 1000);
+    connect(stored_transfer.approval_timer, &QTimer::timeout, this, [this, transfer_id]() {
+        QString reject_error{};
+        const auto rejected = reject_clipboard_transfer(
+            transfer_id,
+            QStringLiteral("Clipboard approval timed out"),
+            reject_error);
+        if (!rejected) {
+            qCWarning(shared_peer_service_log)
+                << "Failed to reject timed out clipboard transfer"
+                << "transfer_id=" << transfer_id
+                << reject_error;
+        }
+    });
+    stored_transfer.approval_timer->start();
+
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSPECIFIED,
+        QStringLiteral("Receiver approval required"));
+    qCInfo(shared_peer_service_log)
+        << "Clipboard offer requires approval"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << sender_peer_id
+        << "sender_name=" << stored_transfer.sender_name
+        << "bytes=" << size;
+    emit clipboard_approval_requested(transfer_id, sender_peer_id, stored_transfer.sender_name, size);
+}
+
+void peer_service::handle_file_transfer_offer(
+    QSslSocket *socket,
+    const shared::v1::TransferOffer &transfer_offer)
+{
+    const auto transfer_id = transfer_offer.transferId().uuid();
+    const auto sender_peer_id = transfer_offer.senderPeerId().uuid();
+    if (!transfer_offer.hasMetadata()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File transfer is missing metadata"));
+        return;
+    }
+
+    if (transfer_offer.metadata().filename().trimmed().isEmpty()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File transfer is missing a filename"));
+        return;
+    }
+
+    QString filename_error{};
+    if (!validate_incoming_filename(transfer_offer.metadata().filename(), filename_error)) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            filename_error);
+        return;
+    }
+
+    if (transfer_offer.recipientKeys().size() != 1) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File transfer has invalid recipient key count"));
+        return;
+    }
+
+    const auto sender_entry = peer_entry_for_id(sender_peer_id);
+    if (!sender_entry.has_value()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("Sender is missing from signed peer list"));
+        return;
+    }
+
+    QString crypto_error{};
+    const auto payload_key = core::transfer_crypto::unwrap_payload_key_from_sender(
+        app_paths_,
+        sender_entry->x25519PublicKey(),
+        transfer_offer.recipientKeys().constFirst().encryptedKey(),
+        crypto_error);
+    if (payload_key.isEmpty()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
+            crypto_error);
+        return;
+    }
+
+    const auto sanitized_filename = sanitize_filename(transfer_offer.metadata().filename());
+    const auto final_path = unique_download_path(sanitized_filename);
+    if (final_path.isEmpty()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            QStringLiteral("Failed to determine destination path for incoming file"));
+        return;
+    }
+
+    QString temp_path_error{};
+    const auto temp_path = prepare_incoming_file_path(final_path, transfer_id, temp_path_error);
+    if (temp_path.isEmpty()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            temp_path_error);
+        return;
+    }
+
+    incoming_file_transfer transfer{};
+    transfer.transfer_id = transfer_id;
+    transfer.sender_peer_id = sender_peer_id;
+    transfer.sender_name = sender_entry->identity().name();
+    transfer.filename = sanitized_filename;
+    transfer.final_path = final_path;
+    transfer.temp_path = temp_path;
+    transfer.payload_key = payload_key;
+    transfer.expected_sha256 = transfer_offer.metadata().sha256().toLatin1();
+    transfer.expected_size = transfer_offer.metadata().size();
+    transfer.expected_chunk_count = transfer_offer.metadata().chunkCount();
+    QFile destination_file{temp_path};
+    if (!destination_file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            QStringLiteral("Failed to open destination file for writing"));
+        return;
+    }
+    destination_file.close();
+    incoming_file_transfers_.insert(transfer_id, std::move(transfer));
+
+    if (settings_repository_.auto_accept_files()) {
+        QString approve_error{};
+        if (!approve_file_transfer(transfer_id, approve_error)) {
+            send_transfer_status(
+                socket,
+                transfer_id,
+                shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+                approve_error);
+        }
+        return;
+    }
+
+    auto &stored_transfer = incoming_file_transfers_[transfer_id];
+    stored_transfer.approval_timer = new QTimer{this};
+    stored_transfer.approval_timer->setSingleShot(true);
+    stored_transfer.approval_timer->setInterval(3 * 60 * 1000);
+    connect(stored_transfer.approval_timer, &QTimer::timeout, this, [this, transfer_id]() {
+        QString reject_error{};
+        const auto rejected = reject_file_transfer(
+            transfer_id,
+            QStringLiteral("File approval timed out"),
+            reject_error);
+        if (!rejected) {
+            qCWarning(shared_peer_service_log)
+                << "Failed to reject timed out file transfer"
+                << "transfer_id=" << transfer_id
+                << reject_error;
+        }
+    });
+    stored_transfer.approval_timer->start();
+
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSPECIFIED,
+        QStringLiteral("Receiver approval required"));
+    emit file_approval_requested(
+        transfer_id,
+        sender_peer_id,
+        stored_transfer.sender_name,
+        stored_transfer.filename,
+        stored_transfer.expected_size);
+}
+
+void peer_service::handle_clipboard_transfer_chunk(
+    QSslSocket *socket,
+    const shared::v1::TransferChunk &transfer_chunk)
+{
+    const auto transfer_id = transfer_chunk.transferId().uuid();
+    auto transfer_it = incoming_clipboard_transfers_.find(transfer_id);
+    if (transfer_it == incoming_clipboard_transfers_.end()) {
+        return;
+    }
+
+    qCInfo(shared_peer_service_log)
+        << "Received clipboard transfer chunk"
+        << "transfer_id=" << transfer_id
+        << "sender_peer_id=" << transfer_it->sender_peer_id
+        << "chunk_index=" << transfer_chunk.chunkIndex()
+        << "bytes=" << transfer_chunk.ciphertext().size();
+
+    if (!transfer_it->approved) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("Clipboard chunk arrived before approval"));
+        clear_incoming_transfer(transfer_id);
+        return;
+    }
+
+    const auto plaintext = transfer_chunk.ciphertext();
+    if (static_cast<quint64>(plaintext.size()) != transfer_it->expected_size
+        || core::transfer_crypto::sha256_hex(plaintext) != transfer_it->expected_sha256) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_HASH_MISMATCH,
+            QStringLiteral("Clipboard transfer integrity check failed"));
+        clear_incoming_transfer(transfer_id);
+        return;
+    }
+
+    emit clipboard_text_received(
+        transfer_it->sender_peer_id,
+        transfer_it->sender_name,
+        QString::fromUtf8(plaintext));
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSPECIFIED,
+        QStringLiteral("Clipboard transfer completed"));
+    clear_incoming_transfer(transfer_id);
+}
+
+void peer_service::handle_file_transfer_chunk(
+    QSslSocket *socket,
+    const shared::v1::TransferChunk &transfer_chunk)
+{
+    const auto transfer_id = transfer_chunk.transferId().uuid();
+    auto transfer_it = incoming_file_transfers_.find(transfer_id);
+    if (transfer_it == incoming_file_transfers_.end()) {
+        return;
+    }
+
+    if (!transfer_it->approved) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File chunk arrived before approval"));
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    if (transfer_chunk.chunkIndex() != transfer_it->next_chunk_index
+        || transfer_chunk.offset() != transfer_it->received_size) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File chunk order mismatch"));
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    QString decrypt_error{};
+    const auto plaintext = core::transfer_crypto::decrypt_aes_gcm(
+        transfer_it->payload_key,
+        {.ciphertext = transfer_chunk.ciphertext(),
+         .nonce = transfer_chunk.nonce(),
+         .auth_tag = transfer_chunk.authTag()},
+        decrypt_error);
+    if (plaintext.isEmpty() && !transfer_chunk.ciphertext().isEmpty()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
+            decrypt_error);
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    QFile destination_file{transfer_it->temp_path};
+    if (!destination_file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            destination_file.errorString());
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    if (destination_file.write(plaintext) != plaintext.size()) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            destination_file.errorString());
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+    destination_file.flush();
+    destination_file.close();
+
+    transfer_it->received_size += static_cast<quint64>(plaintext.size());
+    ++transfer_it->next_chunk_index;
+
+    if (transfer_it->received_size < transfer_it->expected_size) {
+        return;
+    }
+
+    QFile verify_file{transfer_it->temp_path};
+    if (!verify_file.open(QIODevice::ReadOnly)) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            verify_file.errorString());
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    const auto verified_plaintext = verify_file.readAll();
+    if (static_cast<quint64>(verified_plaintext.size()) != transfer_it->expected_size
+        || core::transfer_crypto::sha256_hex(verified_plaintext) != transfer_it->expected_sha256) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_HASH_MISMATCH,
+            QStringLiteral("File transfer integrity check failed"));
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    QFile::remove(transfer_it->final_path);
+    if (!QFile::rename(transfer_it->temp_path, transfer_it->final_path)) {
+        send_transfer_status(
+            socket,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DISK_ERROR,
+            QStringLiteral("Failed to move received file into the download directory"));
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+
+    emit file_received(
+        transfer_it->sender_peer_id,
+        transfer_it->sender_name,
+        transfer_it->filename,
+        transfer_it->final_path,
+        transfer_it->expected_size);
+    send_transfer_status(
+        socket,
+        transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED,
+        shared::v1::ErrorCodeGadget::ErrorCode::ERROR_UNSPECIFIED,
+        QStringLiteral("File transfer completed"));
+    clear_incoming_file_transfer(transfer_id);
 }
 
 void peer_service::maybe_connect_to_peer(
@@ -904,6 +2378,227 @@ bool peer_service::has_session_for_peer(const QString &peer_id) const
     }
 
     return false;
+}
+
+QStringList peer_service::current_directly_connected_peer_ids() const
+{
+    QStringList peer_ids{};
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (!it.value().authenticated || it.value().remote_peer_id.isEmpty()) {
+            continue;
+        }
+
+        peer_ids.append(it.value().remote_peer_id);
+    }
+
+    peer_ids.removeDuplicates();
+    return peer_ids;
+}
+
+void peer_service::schedule_reachability_broadcast()
+{
+    if (reachability_broadcast_pending_) {
+        return;
+    }
+
+    reachability_broadcast_pending_ = true;
+    const auto delay_ms = QRandomGenerator::global()->bounded(
+        reachability_broadcast_min_delay_ms,
+        reachability_broadcast_max_delay_ms + 1);
+    reachability_broadcast_timer_.start(delay_ms);
+}
+
+void peer_service::clear_reachability_claims_for_advertiser(const QString &advertiser_peer_id)
+{
+    if (advertiser_peer_id.isEmpty()) {
+        return;
+    }
+
+    for (auto target_it = reachability_claims_by_target_.begin(); target_it != reachability_claims_by_target_.end();) {
+        target_it->remove(advertiser_peer_id);
+        if (target_it->isEmpty()) {
+            target_it = reachability_claims_by_target_.erase(target_it);
+            continue;
+        }
+
+        ++target_it;
+    }
+}
+
+bool peer_service::purge_expired_reachability_claims()
+{
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    auto changed = false;
+
+    for (auto target_it = reachability_claims_by_target_.begin(); target_it != reachability_claims_by_target_.end();) {
+        for (auto advertiser_it = target_it->begin(); advertiser_it != target_it->end();) {
+            if (advertiser_it->expiry_time_ms > now_ms) {
+                ++advertiser_it;
+                continue;
+            }
+
+            advertiser_it = target_it->erase(advertiser_it);
+            changed = true;
+        }
+
+        if (target_it->isEmpty()) {
+            target_it = reachability_claims_by_target_.erase(target_it);
+            continue;
+        }
+
+        ++target_it;
+    }
+
+    return changed;
+}
+
+bool peer_service::peer_has_active_reachability_advertiser(const QString &peer_id) const
+{
+    const auto claims = reachability_claims_by_target_.value(peer_id);
+    if (claims.isEmpty()) {
+        return false;
+    }
+
+    for (auto it = claims.begin(); it != claims.end(); ++it) {
+        if (authenticated_socket_for_peer(it.key()) != nullptr) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+QStringList peer_service::direct_relay_candidates_for_peer(const QString &peer_id) const
+{
+    QStringList candidates{};
+    const auto claims = reachability_claims_by_target_.value(peer_id);
+    for (auto it = claims.begin(); it != claims.end(); ++it) {
+        if (authenticated_socket_for_peer(it.key()) == nullptr) {
+            continue;
+        }
+
+        candidates.append(it.key());
+    }
+
+    candidates.removeDuplicates();
+    return candidates;
+}
+
+QCoro::Task<std::optional<QString>> peer_service::resolve_relay_peer(
+    const QString &destination_peer_id,
+    const QString &transfer_id)
+{
+    const auto relay_candidates = direct_relay_candidates_for_peer(destination_peer_id);
+    if (relay_candidates.isEmpty()) {
+        qCWarning(shared_peer_service_log)
+            << "No direct relay candidates available for who-has"
+            << "transfer_id=" << transfer_id
+            << "destination_peer_id=" << destination_peer_id;
+        reachability_claims_by_target_.remove(destination_peer_id);
+        write_peer_status_snapshot();
+        co_return std::nullopt;
+    }
+
+    const auto request_id = next_request_id();
+    pending_who_has_query query{};
+    query.destination_peer_id = destination_peer_id;
+    query.transfer_id = transfer_id;
+    pending_who_has_queries_.insert(request_id, query);
+
+    shared::v1::PeerId destination_peer_id_message{};
+    destination_peer_id_message.setUuid(destination_peer_id);
+
+    shared::v1::WhoHas who_has{};
+    who_has.setDestinationPeerId(destination_peer_id_message);
+    if (!transfer_id.isEmpty()) {
+        shared::v1::TransferId transfer_id_message{};
+        transfer_id_message.setUuid(transfer_id);
+        who_has.setTransferId(transfer_id_message);
+    }
+
+    qCInfo(shared_peer_service_log)
+        << "Broadcasting who-has"
+        << "request_id=" << request_id
+        << "transfer_id=" << transfer_id
+        << "destination_peer_id=" << destination_peer_id
+        << "relay_candidates=" << relay_candidates;
+    for (const auto &relay_peer_id : relay_candidates) {
+        auto *socket = authenticated_socket_for_peer(relay_peer_id);
+        if (socket == nullptr) {
+            qCWarning(shared_peer_service_log)
+                << "Skipping who-has candidate without live socket"
+                << "request_id=" << request_id
+                << "relay_peer_id=" << relay_peer_id;
+            continue;
+        }
+
+        auto envelope = make_envelope(next_message_id());
+        envelope.setRequestId(request_id);
+        envelope.setWhoHas(who_has);
+        send_envelope(socket, envelope, QStringLiteral("who-has"), outbound_priority::high);
+    }
+
+    std::optional<QString> selected_relay_peer_id{};
+    QElapsedTimer timer{};
+    timer.start();
+
+    while (timer.elapsed() < 3000) {
+        auto pending_it = pending_who_has_queries_.find(request_id);
+        if (pending_it == pending_who_has_queries_.end()) {
+            break;
+        }
+
+        quint32 best_rtt_ms{std::numeric_limits<quint32>::max()};
+        for (auto it = pending_it->replies_by_relay_peer_id.cbegin();
+             it != pending_it->replies_by_relay_peer_id.cend();
+             ++it) {
+            if (!it->reachable) {
+                continue;
+            }
+
+            if (!selected_relay_peer_id.has_value() || it->rtt_ms < best_rtt_ms) {
+                selected_relay_peer_id = it->relay_peer_id;
+                best_rtt_ms = it->rtt_ms;
+            }
+        }
+
+        if (selected_relay_peer_id.has_value()) {
+            break;
+        }
+
+        const auto remaining_ms = 3000 - timer.elapsed();
+        const auto result = co_await qCoro(
+            this,
+            &peer_service::who_has_query_progressed,
+            std::chrono::milliseconds{remaining_ms});
+        if (!result.has_value()) {
+            break;
+        }
+
+        if (*result != request_id) {
+            continue;
+        }
+    }
+
+    pending_who_has_queries_.remove(request_id);
+    if (!selected_relay_peer_id.has_value()) {
+        qCWarning(shared_peer_service_log)
+            << "Who-has timed out without reachable relay"
+            << "request_id=" << request_id
+            << "transfer_id=" << transfer_id
+            << "destination_peer_id=" << destination_peer_id;
+        reachability_claims_by_target_.remove(destination_peer_id);
+        write_peer_status_snapshot();
+        co_return std::nullopt;
+    }
+
+    qCInfo(shared_peer_service_log)
+        << "Who-has selected relay"
+        << "request_id=" << request_id
+        << "transfer_id=" << transfer_id
+        << "destination_peer_id=" << destination_peer_id
+        << "relay_peer_id=" << *selected_relay_peer_id;
+    co_return selected_relay_peer_id;
 }
 
 bool peer_service::should_keep_session(
@@ -1001,6 +2696,486 @@ void peer_service::merge_claimed_addresses(
     write_peer_status_snapshot();
     broadcast_address_hint(address_hint, exclude_socket);
     attempt_connections();
+}
+
+QSslSocket *peer_service::authenticated_socket_for_peer(const QString &peer_id) const
+{
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (it.value().authenticated && it.value().remote_peer_id == peer_id) {
+            return it.key();
+        }
+    }
+    return nullptr;
+}
+
+std::optional<shared::v1::PeerListEntry> peer_service::peer_entry_for_id(const QString &peer_id) const
+{
+    QString error_message{};
+    const auto peer_list = load_current_peer_list(error_message);
+    if (!error_message.isEmpty()) {
+        qCCritical(shared_peer_service_log) << "Failed to load peer list for peer lookup" << error_message;
+        return std::nullopt;
+    }
+
+    for (const auto &entry : peer_list.peers()) {
+        if (entry.identity().peerId().uuid() == peer_id) {
+            return entry;
+        }
+    }
+
+    return std::nullopt;
+}
+
+QByteArray peer_service::payload_key_for_recipient(
+    const QString &peer_id,
+    const QByteArray &payload_key,
+    QString &error_message) const
+{
+    const auto peer_entry = peer_entry_for_id(peer_id);
+    if (!peer_entry.has_value()) {
+        error_message = QStringLiteral("Peer is missing from the signed peer list");
+        return {};
+    }
+
+    return core::transfer_crypto::wrap_payload_key_for_recipient(
+        app_paths_,
+        peer_entry->x25519PublicKey(),
+        payload_key,
+        error_message);
+}
+
+bool peer_service::validate_incoming_filename(const QString &filename, QString &error_message) const
+{
+    if (filename.isEmpty()) {
+        error_message = QStringLiteral("File transfer is missing a filename");
+        return false;
+    }
+
+    if (QFileInfo{filename}.fileName() != filename) {
+        error_message = QStringLiteral("File transfer filename contains path components");
+        return false;
+    }
+
+    if (filename == QStringLiteral(".") || filename == QStringLiteral("..")) {
+        error_message = QStringLiteral("File transfer filename is invalid");
+        return false;
+    }
+
+    for (const auto character : filename) {
+        if (character.isNull()
+            || character.category() == QChar::Other_Control
+            || character == QChar::ReplacementCharacter) {
+            error_message = QStringLiteral("File transfer filename contains invalid characters");
+            return false;
+        }
+
+        switch (character.unicode()) {
+        case '/':
+        case '\\':
+        case ':':
+        case '*':
+        case '?':
+        case '"':
+        case '<':
+        case '>':
+        case '|':
+            error_message = QStringLiteral("File transfer filename contains unsafe characters");
+            return false;
+        default:
+            break;
+        }
+    }
+
+    return true;
+}
+
+QString peer_service::sanitize_filename(const QString &filename) const
+{
+    return filename;
+}
+
+QString peer_service::prepare_incoming_file_path(
+    const QString &final_path,
+    const QString &transfer_id,
+    QString &error_message) const
+{
+    if (final_path.isEmpty()) {
+        error_message = QStringLiteral("Failed to determine destination path for incoming file");
+        return {};
+    }
+
+    if (transfer_id.trimmed().isEmpty()) {
+        error_message = QStringLiteral("Incoming file transfer is missing a transfer id");
+        return {};
+    }
+
+    const QFileInfo final_info{final_path};
+    const auto temp_filename = QStringLiteral("%1.%2.part").arg(
+        final_info.fileName(),
+        transfer_id);
+    const auto temp_path = final_info.dir().filePath(temp_filename);
+    QFile destination_file{temp_path};
+    if (!destination_file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        error_message = destination_file.errorString();
+        return {};
+    }
+    destination_file.close();
+    return temp_path;
+}
+
+QString peer_service::unique_download_path(const QString &filename) const
+{
+    QDir download_dir{settings_repository_.download_path()};
+    if (!download_dir.exists()) {
+        [[maybe_unused]] const auto created = QDir{}.mkpath(download_dir.path());
+    }
+
+    const QFileInfo file_info{sanitize_filename(filename)};
+    const auto base_name = file_info.completeBaseName().isEmpty()
+        ? file_info.fileName()
+        : file_info.completeBaseName();
+    const auto suffix = file_info.suffix();
+
+    auto candidate_name = file_info.fileName();
+    auto candidate = download_dir.filePath(candidate_name);
+    if (!QFileInfo::exists(candidate)) {
+        return candidate;
+    }
+
+    for (int index = 1; index < 10000; ++index) {
+        candidate_name = build_numbered_filename(base_name, suffix, index);
+        candidate = download_dir.filePath(candidate_name);
+        if (!QFileInfo::exists(candidate)) {
+            return candidate;
+        }
+    }
+
+    return download_dir.filePath(
+        QStringLiteral("%1-%2").arg(
+            QUuid::createUuid().toString(QUuid::WithoutBraces),
+            sanitize_filename(filename)));
+}
+
+void peer_service::ensure_socket_draining(QSslSocket *socket)
+{
+    auto state_it = socket_send_states_.find(socket);
+    if (state_it == socket_send_states_.end() || state_it->draining) {
+        return;
+    }
+
+    state_it->draining = true;
+    QCoro::connect(
+        drain_socket_queue(socket),
+        this,
+        [this, socket]() {
+            auto state_it = socket_send_states_.find(socket);
+            if (state_it == socket_send_states_.end()) {
+                return;
+            }
+            state_it->draining = false;
+            if (state_it->queued_bytes > 0) {
+                ensure_socket_draining(socket);
+            }
+        });
+}
+
+QCoro::Task<> peer_service::drain_socket_queue(QSslSocket *socket)
+{
+    while (socket != nullptr && sessions_.contains(socket) && socket_send_states_.contains(socket)) {
+        auto next_frame = take_next_frame(socket);
+        if (!next_frame.has_value()) {
+            break;
+        }
+
+        while (socket->bytesToWrite() >= socket_backlog_limit_bytes) {
+            const auto flushed = co_await qCoro(static_cast<QIODevice *>(socket)).waitForBytesWritten(std::chrono::seconds{5});
+            if (!flushed.has_value()) {
+                qCCritical(shared_peer_service_log) << "Timed out waiting for socket backlog to drain";
+                close_socket(socket, QStringLiteral("Timed out waiting for transfer backlog"));
+                co_return;
+            }
+        }
+
+        if (socket->write(next_frame->bytes) != next_frame->bytes.size()) {
+            qCCritical(shared_peer_service_log) << "Failed to queue" << next_frame->context << socket->errorString();
+            close_socket(socket, QStringLiteral("Failed to queue %1").arg(next_frame->context));
+            co_return;
+        }
+        if (!socket->flush()) {
+            qCWarning(shared_peer_service_log) << "Failed to flush" << next_frame->context << socket->errorString();
+        }
+
+        emit socket_queue_progressed(socket);
+    }
+}
+
+qsizetype peer_service::queued_bytes_for_socket(QSslSocket *socket) const
+{
+    const auto state_it = socket_send_states_.find(socket);
+    if (state_it == socket_send_states_.end()) {
+        return 0;
+    }
+
+    return state_it->queued_bytes;
+}
+
+void peer_service::enqueue_frame(QSslSocket *socket, outbound_frame frame)
+{
+    auto state_it = socket_send_states_.find(socket);
+    if (state_it == socket_send_states_.end()) {
+        qCWarning(shared_peer_service_log) << "Dropping queued frame for unknown socket" << frame.context;
+        return;
+    }
+
+    state_it->queued_bytes += frame.bytes.size();
+    switch (frame.priority) {
+    case outbound_priority::high:
+        state_it->high.push_back(std::move(frame));
+        break;
+    case outbound_priority::normal:
+        state_it->normal.push_back(std::move(frame));
+        break;
+    case outbound_priority::low:
+        state_it->low.push_back(std::move(frame));
+        break;
+    }
+
+    ensure_socket_draining(socket);
+}
+
+std::optional<peer_service::outbound_frame> peer_service::take_next_frame(QSslSocket *socket)
+{
+    auto state_it = socket_send_states_.find(socket);
+    if (state_it == socket_send_states_.end()) {
+        return std::nullopt;
+    }
+
+    auto pop = [&state_it](auto &queue) -> std::optional<outbound_frame> {
+        if (queue.empty()) {
+            return std::nullopt;
+        }
+        auto frame = std::move(queue.front());
+        queue.pop_front();
+        state_it->queued_bytes -= frame.bytes.size();
+        return frame;
+    };
+
+    if (auto frame = pop(state_it->high); frame.has_value()) {
+        return frame;
+    }
+    if (auto frame = pop(state_it->normal); frame.has_value()) {
+        return frame;
+    }
+    return pop(state_it->low);
+}
+
+void peer_service::start_outgoing_file_transfer(const QString &transfer_id)
+{
+    auto transfer_it = outgoing_file_transfers_.find(transfer_id);
+    if (transfer_it == outgoing_file_transfers_.end() || transfer_it->worker_started) {
+        return;
+    }
+
+    transfer_it->worker_started = true;
+    QCoro::connect(
+        run_outgoing_file_transfer(transfer_id),
+        this,
+        [this, transfer_id]() {
+            if (outgoing_file_transfers_.contains(transfer_id)) {
+                clear_outgoing_file_transfer(transfer_id);
+            }
+        });
+}
+
+QCoro::Task<> peer_service::run_outgoing_file_transfer(const QString &transfer_id)
+{
+    auto transfer_it = outgoing_file_transfers_.find(transfer_id);
+    if (transfer_it == outgoing_file_transfers_.end()) {
+        co_return;
+    }
+
+    auto *socket = authenticated_socket_for_peer(transfer_it->recipient_peer_id);
+    if (socket == nullptr) {
+        emit_file_transfer_status(
+            transfer_id,
+            transfer_it->recipient_peer_id,
+            transfer_it->recipient_name,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            QStringLiteral("Recipient is no longer connected"));
+        co_return;
+    }
+
+    QFile file{transfer_it->file_path};
+    if (!file.open(QIODevice::ReadOnly)) {
+        emit_file_transfer_status(
+            transfer_id,
+            transfer_it->recipient_peer_id,
+            transfer_it->recipient_name,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            file.errorString());
+        co_return;
+    }
+
+    for (quint64 chunk_index = 0, offset = 0; !file.atEnd(); ++chunk_index) {
+        while (queued_bytes_for_socket(socket) >= transfer_queue_limit_bytes) {
+            const auto result = co_await qCoro(this, &peer_service::socket_queue_progressed, std::chrono::seconds{5});
+            if (!result.has_value()) {
+                emit_file_transfer_status(
+                    transfer_id,
+                    transfer_it->recipient_peer_id,
+                    transfer_it->recipient_name,
+                    shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                    QStringLiteral("Timed out waiting for socket send queue"));
+                co_return;
+            }
+
+            if (*result != socket) {
+                continue;
+            }
+        }
+
+        const auto plaintext = file.read(transfer_chunk_size);
+        if (plaintext.isEmpty() && !file.atEnd()) {
+            emit_file_transfer_status(
+                transfer_id,
+                transfer_it->recipient_peer_id,
+                transfer_it->recipient_name,
+                shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                file.errorString());
+            co_return;
+        }
+
+        QString crypto_error{};
+        const auto encrypted_chunk = core::transfer_crypto::encrypt_aes_gcm(
+            transfer_it->payload_key,
+            plaintext,
+            crypto_error);
+        if (encrypted_chunk.ciphertext.isEmpty() && !plaintext.isEmpty()) {
+            emit_file_transfer_status(
+                transfer_id,
+                transfer_it->recipient_peer_id,
+                transfer_it->recipient_name,
+                shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                crypto_error);
+            co_return;
+        }
+
+        shared::v1::TransferId transfer_id_message{};
+        transfer_id_message.setUuid(transfer_id);
+
+        shared::v1::TransferChunk chunk{};
+        chunk.setTransferId(transfer_id_message);
+        chunk.setChunkIndex(chunk_index);
+        chunk.setOffset(offset);
+        chunk.setCiphertext(encrypted_chunk.ciphertext);
+        chunk.setNonce(encrypted_chunk.nonce);
+        chunk.setAuthTag(encrypted_chunk.auth_tag);
+
+        auto envelope = make_envelope(next_message_id());
+        envelope.setTransferChunk(chunk);
+        send_envelope(socket, envelope, QStringLiteral("transfer-chunk"), outbound_priority::low);
+        offset += static_cast<quint64>(plaintext.size());
+    }
+}
+
+void peer_service::emit_transfer_status(
+    const QString &transfer_id,
+    const QString &peer_id,
+    const QString &peer_name,
+    shared::v1::TransferStatusCodeGadget::TransferStatusCode status,
+    const QString &message)
+{
+    emit clipboard_transfer_status(
+        transfer_id,
+        peer_id,
+        peer_name,
+        static_cast<int>(status),
+        message);
+}
+
+void peer_service::emit_file_transfer_status(
+    const QString &transfer_id,
+    const QString &peer_id,
+    const QString &peer_name,
+    shared::v1::TransferStatusCodeGadget::TransferStatusCode status,
+    const QString &message)
+{
+    emit file_transfer_status(
+        transfer_id,
+        peer_id,
+        peer_name,
+        static_cast<int>(status),
+        message);
+}
+
+void peer_service::send_transfer_status(
+    QSslSocket *socket,
+    const QString &transfer_id,
+    shared::v1::TransferStatusCodeGadget::TransferStatusCode status,
+    shared::v1::ErrorCodeGadget::ErrorCode error_code,
+    const QString &message)
+{
+    shared::v1::TransferId transfer_id_message{};
+    transfer_id_message.setUuid(transfer_id);
+
+    shared::v1::PeerId local_peer_id{};
+    local_peer_id.setUuid(configuration_.peer_id);
+
+    shared::v1::TransferStatus transfer_status{};
+    transfer_status.setTransferId(transfer_id_message);
+    transfer_status.setPeerId(local_peer_id);
+    transfer_status.setStatus(status);
+    transfer_status.setErrorCode(error_code);
+    transfer_status.setMessage(message);
+
+    auto envelope = make_envelope(next_message_id());
+    envelope.setTransferStatus(transfer_status);
+    send_envelope(socket, envelope, QStringLiteral("transfer-status"), outbound_priority::high);
+}
+
+void peer_service::clear_incoming_transfer(const QString &transfer_id)
+{
+    auto transfer_it = incoming_clipboard_transfers_.find(transfer_id);
+    if (transfer_it == incoming_clipboard_transfers_.end()) {
+        return;
+    }
+
+    if (transfer_it->approval_timer != nullptr) {
+        transfer_it->approval_timer->stop();
+        transfer_it->approval_timer->deleteLater();
+        transfer_it->approval_timer = nullptr;
+    }
+
+    incoming_clipboard_transfers_.erase(transfer_it);
+}
+
+void peer_service::clear_outgoing_transfer(const QString &transfer_id)
+{
+    outgoing_clipboard_transfers_.remove(transfer_id);
+}
+
+void peer_service::clear_incoming_file_transfer(const QString &transfer_id)
+{
+    auto transfer_it = incoming_file_transfers_.find(transfer_id);
+    if (transfer_it == incoming_file_transfers_.end()) {
+        return;
+    }
+
+    if (transfer_it->approval_timer != nullptr) {
+        transfer_it->approval_timer->stop();
+        transfer_it->approval_timer->deleteLater();
+        transfer_it->approval_timer = nullptr;
+    }
+    if (!transfer_it->temp_path.isEmpty() && QFileInfo::exists(transfer_it->temp_path)) {
+        QFile::remove(transfer_it->temp_path);
+    }
+
+    incoming_file_transfers_.erase(transfer_it);
+}
+
+void peer_service::clear_outgoing_file_transfer(const QString &transfer_id)
+{
+    outgoing_file_transfers_.remove(transfer_id);
 }
 
 }

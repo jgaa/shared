@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>eu.lastviking.shared</id>
+  <name>Shared</name>
+  <summary>Secure peer-to-peer clipboard and file transfer</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="eu.lastviking">
+    <name>Jarle Aase</name>
+  </developer>
+  <url type="homepage">https://github.com/jgaa/shared</url>
+  <url type="bugtracker">https://github.com/jgaa/shared/issues</url>
+  <launchable type="desktop-id">eu.lastviking.shared.desktop</launchable>
+  <provides>
+    <binary>sharedgui</binary>
+  </provides>
+  <description>
+    <p>Shared securely transfers clipboard text and files between local peers without a central server.</p>
+    <p>The application is designed for users operating across multiple hosts, virtual machines, and trust boundaries where local encrypted exchange is preferable to cloud relays.</p>
+  </description>
+  <releases>
+    <release version="@APP_VERSION@" />
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>

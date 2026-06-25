@@ -2,12 +2,12 @@
 
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/envelope_io.h"
-#include "shared/desktop/core/openssl_runner.h"
 
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QFile>
 #include <QtCore/QLoggingCategory>
+#include <QtCore/QRandomGenerator>
 #include <QtCore/QSaveFile>
 #include <QtCore/QSet>
 #include <QtCore/QTemporaryDir>
@@ -15,9 +15,11 @@
 #include <QtNetwork/QSslCertificate>
 #include <QtProtobuf/QProtobufSerializer>
 
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <exception>
 #include <stdexcept>
@@ -27,17 +29,6 @@ namespace shared::desktop::core {
 Q_LOGGING_CATEGORY(shared_security_materials_log, "shared.desktop.core.security_materials")
 
 namespace {
-
-QString openssl_subject(const QString &common_name)
-{
-    auto sanitized = common_name;
-    sanitized.replace(QLatin1Char('/'), QLatin1Char('-'));
-    if (sanitized.isEmpty()) {
-        sanitized = QStringLiteral("shared");
-    }
-
-    return QStringLiteral("/CN=%1").arg(sanitized);
-}
 
 QSslCertificate load_certificate_from_path(const QString &path)
 {
@@ -218,11 +209,333 @@ bool verify_peer_list_signature(
     return verified;
 }
 
+QString latest_openssl_error()
+{
+    const auto error = ERR_get_error();
+    if (error == 0) {
+        return QStringLiteral("OpenSSL operation failed");
+    }
+
+    char buffer[256]{};
+    ERR_error_string_n(error, buffer, sizeof(buffer));
+    return QString::fromLatin1(buffer);
+}
+
+void ensure_openssl_success(const bool success, const QString &message)
+{
+    if (!success) {
+        throw_security_error(message + QStringLiteral(": ") + latest_openssl_error());
+    }
+}
+
+using evp_pkey_ptr = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>;
+using x509_ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+using x509_req_ptr = std::unique_ptr<X509_REQ, decltype(&X509_REQ_free)>;
+using bio_ptr = std::unique_ptr<BIO, decltype(&BIO_free)>;
+using bn_ptr = std::unique_ptr<BIGNUM, decltype(&BN_free)>;
+using asn1_integer_ptr = std::unique_ptr<ASN1_INTEGER, decltype(&ASN1_INTEGER_free)>;
+using evp_md_ctx_ptr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+using evp_pkey_ctx_ptr = std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)>;
+
+int cn_name_nid()
+{
+    return OBJ_txt2nid("CN");
+}
+
+evp_pkey_ptr load_private_key(const QString &path, const QString &context)
+{
+    QFile file{path};
+    ensure_file_open(file, QIODevice::ReadOnly, context);
+
+    const auto pem_data = file.readAll();
+    bio_ptr bio{BIO_new_mem_buf(pem_data.constData(), static_cast<int>(pem_data.size())), BIO_free};
+    if (bio == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to create BIO"));
+    }
+
+    evp_pkey_ptr key{PEM_read_bio_PrivateKey(bio.get(), nullptr, nullptr, nullptr), EVP_PKEY_free};
+    if (key == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to parse private key: ") + latest_openssl_error());
+    }
+
+    return key;
+}
+
+x509_ptr load_certificate_any_format(const QByteArray &data, const QString &context)
+{
+    bio_ptr pem_bio{BIO_new_mem_buf(data.constData(), static_cast<int>(data.size())), BIO_free};
+    if (pem_bio == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to create BIO"));
+    }
+
+    if (auto *pem_cert = PEM_read_bio_X509(pem_bio.get(), nullptr, nullptr, nullptr); pem_cert != nullptr) {
+        return x509_ptr{pem_cert, X509_free};
+    }
+
+    const unsigned char *der_data =
+        reinterpret_cast<const unsigned char *>(data.constData());
+    if (auto *der_cert = d2i_X509(nullptr, &der_data, data.size()); der_cert != nullptr) {
+        return x509_ptr{der_cert, X509_free};
+    }
+
+    throw_security_error(context + QStringLiteral(": failed to parse certificate: ") + latest_openssl_error());
+}
+
+x509_ptr load_certificate(const QString &path, const QString &context)
+{
+    QFile file{path};
+    ensure_file_open(file, QIODevice::ReadOnly, context);
+    return load_certificate_any_format(file.readAll(), context);
+}
+
+x509_req_ptr load_csr_der(const QByteArray &der, const QString &context)
+{
+    const unsigned char *data =
+        reinterpret_cast<const unsigned char *>(der.constData());
+    x509_req_ptr request{d2i_X509_REQ(nullptr, &data, der.size()), X509_REQ_free};
+    if (request == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to parse CSR: ") + latest_openssl_error());
+    }
+
+    return request;
+}
+
+void write_private_key_pem(EVP_PKEY *key, const QString &path, const QString &context)
+{
+    bio_ptr bio{BIO_new(BIO_s_mem()), BIO_free};
+    if (bio == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to allocate output BIO"));
+    }
+
+    ensure_openssl_success(
+        PEM_write_bio_PrivateKey(bio.get(), key, nullptr, nullptr, 0, nullptr, nullptr) == 1,
+        context + QStringLiteral(": failed to serialize private key"));
+
+    BUF_MEM *buffer{};
+    BIO_get_mem_ptr(bio.get(), &buffer);
+    if (buffer == nullptr || buffer->data == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to read serialized private key"));
+    }
+
+    QSaveFile file{path};
+    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
+    ensure_write(file, QByteArray{buffer->data, static_cast<qsizetype>(buffer->length)}, context);
+    ensure_commit(file, context);
+}
+
+void write_x509_pem(X509 *certificate, const QString &path, const QString &context)
+{
+    bio_ptr bio{BIO_new(BIO_s_mem()), BIO_free};
+    if (bio == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to allocate output BIO"));
+    }
+
+    ensure_openssl_success(
+        PEM_write_bio_X509(bio.get(), certificate) == 1,
+        context + QStringLiteral(": failed to serialize certificate"));
+
+    BUF_MEM *buffer{};
+    BIO_get_mem_ptr(bio.get(), &buffer);
+    if (buffer == nullptr || buffer->data == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to read serialized certificate"));
+    }
+
+    QSaveFile file{path};
+    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
+    ensure_write(file, QByteArray{buffer->data, static_cast<qsizetype>(buffer->length)}, context);
+    ensure_commit(file, context);
+}
+
+void write_x509_der(X509 *certificate, const QString &path, const QString &context)
+{
+    const auto size = i2d_X509(certificate, nullptr);
+    if (size <= 0) {
+        throw_security_error(context + QStringLiteral(": failed to measure DER certificate"));
+    }
+
+    QByteArray der(size, Qt::Uninitialized);
+    auto *output = reinterpret_cast<unsigned char *>(der.data());
+    ensure_openssl_success(
+        i2d_X509(certificate, &output) == size,
+        context + QStringLiteral(": failed to serialize DER certificate"));
+
+    QSaveFile file{path};
+    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
+    ensure_write(file, der, context);
+    ensure_commit(file, context);
+}
+
+void write_csr_der(X509_REQ *request, const QString &path, const QString &context)
+{
+    const auto size = i2d_X509_REQ(request, nullptr);
+    if (size <= 0) {
+        throw_security_error(context + QStringLiteral(": failed to measure DER CSR"));
+    }
+
+    QByteArray der(size, Qt::Uninitialized);
+    auto *output = reinterpret_cast<unsigned char *>(der.data());
+    ensure_openssl_success(
+        i2d_X509_REQ(request, &output) == size,
+        context + QStringLiteral(": failed to serialize DER CSR"));
+
+    QSaveFile file{path};
+    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
+    ensure_write(file, der, context);
+    ensure_commit(file, context);
+}
+
+void set_subject_common_name(X509_NAME *name, const QString &common_name, const QString &context)
+{
+    const auto encoded_name = common_name.toUtf8();
+    ensure_openssl_success(
+        X509_NAME_add_entry_by_NID(
+            name,
+            cn_name_nid(),
+            MBSTRING_UTF8,
+            reinterpret_cast<const unsigned char *>(encoded_name.constData()),
+            encoded_name.size(),
+            -1,
+            0) == 1,
+        context + QStringLiteral(": failed to set certificate common name"));
+}
+
+void set_certificate_validity(X509 *certificate, const QString &context)
+{
+    ensure_openssl_success(
+        X509_gmtime_adj(X509_getm_notBefore(certificate), -86400) != nullptr,
+        context + QStringLiteral(": failed to set certificate not-before"));
+    ensure_openssl_success(
+        X509_gmtime_adj(X509_getm_notAfter(certificate), 36500LL * 24LL * 60LL * 60LL) != nullptr,
+        context + QStringLiteral(": failed to set certificate not-after"));
+}
+
+void add_extension(X509 *certificate, X509 *issuer, const int nid, const char *value, const QString &context)
+{
+    X509V3_CTX extension_context{};
+    X509V3_set_ctx(&extension_context, issuer, certificate, nullptr, nullptr, 0);
+    auto *extension = X509V3_EXT_conf_nid(nullptr, &extension_context, nid, const_cast<char *>(value));
+    if (extension == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to create X509 extension: ") + latest_openssl_error());
+    }
+
+    const auto extension_guard = std::unique_ptr<X509_EXTENSION, decltype(&X509_EXTENSION_free)>(
+        extension,
+        X509_EXTENSION_free);
+    ensure_openssl_success(
+        X509_add_ext(certificate, extension_guard.get(), -1) == 1,
+        context + QStringLiteral(": failed to add X509 extension"));
+}
+
+qulonglong next_certificate_serial(const QString &serial_path)
+{
+    qulonglong current_serial = 1;
+    QFile file{serial_path};
+    if (file.exists()) {
+        ensure_file_open(file, QIODevice::ReadOnly, QStringLiteral("Failed to open CA serial file"));
+        const auto text = file.readAll().trimmed();
+        bool ok{};
+        const auto parsed = text.toULongLong(&ok, 16);
+        if (!ok || parsed == 0) {
+            throw_security_error(QStringLiteral("Failed to parse CA serial file"));
+        }
+        current_serial = parsed;
+    } else {
+        current_serial = QRandomGenerator::system()->generate64();
+        current_serial &= 0x7fffffffffffffffULL;
+        if (current_serial == 0) {
+            current_serial = 1;
+        }
+    }
+
+    QSaveFile save_file{serial_path};
+    ensure_save_file_open(
+        save_file,
+        QIODevice::WriteOnly | QIODevice::Truncate,
+        QStringLiteral("Failed to open CA serial file for write"));
+    const auto next_serial = QByteArray::number(current_serial + 1, 16).toUpper() + '\n';
+    ensure_write(save_file, next_serial, QStringLiteral("Failed to write CA serial file"));
+    ensure_commit(save_file, QStringLiteral("Failed to commit CA serial file"));
+
+    return current_serial;
+}
+
+asn1_integer_ptr make_asn1_serial(const qulonglong serial, const QString &context)
+{
+    bn_ptr serial_bn{BN_new(), BN_free};
+    if (serial_bn == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to allocate serial number"));
+    }
+
+    ensure_openssl_success(
+        BN_set_word(serial_bn.get(), serial) == 1,
+        context + QStringLiteral(": failed to set serial number"));
+
+    asn1_integer_ptr serial_value{BN_to_ASN1_INTEGER(serial_bn.get(), nullptr), ASN1_INTEGER_free};
+    if (serial_value == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to convert serial number"));
+    }
+
+    return serial_value;
+}
+
+evp_pkey_ptr generate_private_key(const char *algorithm, const char *group_name, const QString &context)
+{
+    evp_pkey_ctx_ptr context_ptr{
+        EVP_PKEY_CTX_new_from_name(nullptr, algorithm, nullptr),
+        EVP_PKEY_CTX_free};
+    if (context_ptr == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to allocate key generation context"));
+    }
+
+    ensure_openssl_success(
+        EVP_PKEY_keygen_init(context_ptr.get()) == 1,
+        context + QStringLiteral(": failed to initialize key generation"));
+
+    if (group_name != nullptr) {
+        ensure_openssl_success(
+            EVP_PKEY_CTX_set_group_name(context_ptr.get(), group_name) == 1,
+            context + QStringLiteral(": failed to select key group"));
+    }
+
+    EVP_PKEY *generated_key{};
+    ensure_openssl_success(
+        EVP_PKEY_generate(context_ptr.get(), &generated_key) == 1,
+        context + QStringLiteral(": failed to generate key"));
+
+    return evp_pkey_ptr{generated_key, EVP_PKEY_free};
+}
+
+x509_req_ptr create_certificate_request(EVP_PKEY *key, const QString &common_name, const QString &context)
+{
+    x509_req_ptr request{X509_REQ_new(), X509_REQ_free};
+    if (request == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to allocate CSR"));
+    }
+
+    ensure_openssl_success(
+        X509_REQ_set_version(request.get(), 0L) == 1,
+        context + QStringLiteral(": failed to set CSR version"));
+
+    auto *subject = X509_REQ_get_subject_name(request.get());
+    if (subject == nullptr) {
+        throw_security_error(context + QStringLiteral(": failed to get CSR subject"));
+    }
+    set_subject_common_name(subject, common_name, context);
+
+    ensure_openssl_success(
+        X509_REQ_set_pubkey(request.get(), key) == 1,
+        context + QStringLiteral(": failed to set CSR public key"));
+    ensure_openssl_success(
+        X509_REQ_sign(request.get(), key, EVP_sha256()) > 0,
+        context + QStringLiteral(": failed to sign CSR"));
+
+    return request;
+}
+
 }
 
 security_materials::security_materials(const app_paths &app_paths)
     : app_paths_{app_paths}
-    , openssl_runner_ptr_{new openssl_runner{}}
 {
 }
 
@@ -300,16 +613,20 @@ security_materials::prepared_enrollment security_materials::prepare_enrollment_r
     remove_if_exists(app_paths_.peer_certificate_der_path(), QStringLiteral("Failed to remove stale peer certificate DER file"));
     remove_if_exists(app_paths_.peer_csr_der_path(), QStringLiteral("Failed to remove stale peer CSR file"));
 
-    const auto csr_result = openssl_runner_ptr_->run({
-        QStringLiteral("req"),
-        QStringLiteral("-new"),
-        QStringLiteral("-key"), app_paths_.peer_key_path(),
-        QStringLiteral("-subj"), openssl_subject(name),
-        QStringLiteral("-outform"), QStringLiteral("DER"),
-        QStringLiteral("-out"), app_paths_.peer_csr_der_path(),
-    });
-    if (!csr_result.success) {
-        result.error_message = csr_result.error_message;
+    try {
+        const auto key = load_private_key(
+            app_paths_.peer_key_path(),
+            QStringLiteral("Failed to load peer private key for enrollment CSR"));
+        const auto request = create_certificate_request(
+            key.get(),
+            name,
+            QStringLiteral("Failed to generate enrollment CSR"));
+        write_csr_der(
+            request.get(),
+            app_paths_.peer_csr_der_path(),
+            QStringLiteral("Failed to persist enrollment CSR"));
+    } catch (const std::exception &exception) {
+        result.error_message = QString::fromUtf8(exception.what());
         qCCritical(shared_security_materials_log) << "Failed to generate enrollment CSR" << result.error_message;
         return result;
     }
@@ -379,14 +696,16 @@ security_materials::operation_result security_materials::finalize_enrollment(
             ensure_commit(certificate_file, QStringLiteral("Failed to commit peer certificate file"));
         }
 
-        const auto pem_result = openssl_runner_ptr_->run({
-            QStringLiteral("x509"),
-            QStringLiteral("-inform"), QStringLiteral("DER"),
-            QStringLiteral("-in"), app_paths_.peer_certificate_der_path(),
-            QStringLiteral("-out"), app_paths_.peer_certificate_path(),
-        });
-        if (!pem_result.success) {
-            result.error_message = pem_result.error_message;
+        try {
+            const auto certificate = load_certificate(
+                app_paths_.peer_certificate_der_path(),
+                QStringLiteral("Failed to load enrolled peer certificate"));
+            write_x509_pem(
+                certificate.get(),
+                app_paths_.peer_certificate_path(),
+                QStringLiteral("Failed to write enrolled peer certificate"));
+        } catch (const std::exception &exception) {
+            result.error_message = QString::fromUtf8(exception.what());
             qCCritical(shared_security_materials_log) << "Failed to convert peer certificate to PEM" << result.error_message;
             return result;
         }
@@ -459,41 +778,84 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
         return decision;
     }
 
-    const auto csr_path = temporary_dir.filePath(QStringLiteral("request.csr.der"));
     const auto certificate_der_path = temporary_dir.filePath(QStringLiteral("peer-cert.der"));
     const auto certificate_pem_path = temporary_dir.filePath(QStringLiteral("peer-cert.pem"));
 
-    {
-        QFile csr_file{csr_path};
-        ensure_file_open(csr_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open temporary CSR file"));
-        ensure_write(csr_file, request.certificate_request, QStringLiteral("Failed to write temporary CSR file"));
-    }
+    try {
+        const auto csr = load_csr_der(
+            request.certificate_request,
+            QStringLiteral("Failed to load enrollment CSR"));
+        evp_pkey_ptr csr_public_key{X509_REQ_get_pubkey(csr.get()), EVP_PKEY_free};
+        if (csr_public_key == nullptr) {
+            throw_security_error(QStringLiteral("Failed to extract enrollment CSR public key"));
+        }
+        ensure_openssl_success(
+            X509_REQ_verify(csr.get(), csr_public_key.get()) == 1,
+            QStringLiteral("Failed to verify enrollment CSR signature"));
 
-    const auto sign_result = openssl_runner_ptr_->run({
-        QStringLiteral("x509"),
-        QStringLiteral("-req"),
-        QStringLiteral("-inform"), QStringLiteral("DER"),
-        QStringLiteral("-in"), csr_path,
-        QStringLiteral("-CA"), app_paths_.ca_certificate_path(),
-        QStringLiteral("-CAkey"), app_paths_.ca_key_path(),
-        QStringLiteral("-CAserial"), app_paths_.ca_serial_path(),
-        QStringLiteral("-out"), certificate_pem_path,
-        QStringLiteral("-days"), QStringLiteral("36500"),
-        QStringLiteral("-sha256"),
-    });
-    if (!sign_result.success) {
-        error_message = sign_result.error_message;
-        return decision;
-    }
+        const auto ca_key = load_private_key(
+            app_paths_.ca_key_path(),
+            QStringLiteral("Failed to load trusted-agent CA private key"));
+        const auto ca_certificate = load_certificate(
+            app_paths_.ca_certificate_path(),
+            QStringLiteral("Failed to load trusted-agent CA certificate"));
 
-    const auto der_result = openssl_runner_ptr_->run({
-        QStringLiteral("x509"),
-        QStringLiteral("-in"), certificate_pem_path,
-        QStringLiteral("-outform"), QStringLiteral("DER"),
-        QStringLiteral("-out"), certificate_der_path,
-    });
-    if (!der_result.success) {
-        error_message = der_result.error_message;
+        x509_ptr certificate{X509_new(), X509_free};
+        if (certificate == nullptr) {
+            throw_security_error(QStringLiteral("Failed to allocate enrollment certificate"));
+        }
+
+        ensure_openssl_success(
+            X509_set_version(certificate.get(), 2L) == 1,
+            QStringLiteral("Failed to set enrollment certificate version"));
+        const auto serial = make_asn1_serial(
+            next_certificate_serial(app_paths_.ca_serial_path()),
+            QStringLiteral("Failed to create enrollment certificate serial"));
+        ensure_openssl_success(
+            X509_set_serialNumber(certificate.get(), serial.get()) == 1,
+            QStringLiteral("Failed to assign enrollment certificate serial"));
+        set_certificate_validity(certificate.get(), QStringLiteral("Failed to set enrollment certificate validity"));
+        ensure_openssl_success(
+            X509_set_issuer_name(certificate.get(), X509_get_subject_name(ca_certificate.get())) == 1,
+            QStringLiteral("Failed to set enrollment certificate issuer"));
+        ensure_openssl_success(
+            X509_set_subject_name(certificate.get(), X509_REQ_get_subject_name(csr.get())) == 1,
+            QStringLiteral("Failed to set enrollment certificate subject"));
+        ensure_openssl_success(
+            X509_set_pubkey(certificate.get(), csr_public_key.get()) == 1,
+            QStringLiteral("Failed to set enrollment certificate public key"));
+        add_extension(
+            certificate.get(),
+            ca_certificate.get(),
+            NID_basic_constraints,
+            "critical,CA:FALSE",
+            QStringLiteral("Failed to configure enrollment certificate basic constraints"));
+        add_extension(
+            certificate.get(),
+            ca_certificate.get(),
+            NID_key_usage,
+            "critical,digitalSignature,keyAgreement",
+            QStringLiteral("Failed to configure enrollment certificate key usage"));
+        add_extension(
+            certificate.get(),
+            ca_certificate.get(),
+            NID_ext_key_usage,
+            "serverAuth,clientAuth",
+            QStringLiteral("Failed to configure enrollment certificate extended key usage"));
+        ensure_openssl_success(
+            X509_sign(certificate.get(), ca_key.get(), EVP_sha256()) > 0,
+            QStringLiteral("Failed to sign enrollment certificate"));
+
+        write_x509_pem(
+            certificate.get(),
+            certificate_pem_path,
+            QStringLiteral("Failed to write enrollment certificate PEM"));
+        write_x509_der(
+            certificate.get(),
+            certificate_der_path,
+            QStringLiteral("Failed to write enrollment certificate DER"));
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
         return decision;
     }
 
@@ -729,53 +1091,99 @@ QString security_materials::format_enrollment_fingerprint(const QString &value)
 
 bool security_materials::generate_ec_private_key(const QString &path, QString &error_message) const
 {
-    const auto result = openssl_runner_ptr_->run({
-        QStringLiteral("genpkey"),
-        QStringLiteral("-algorithm"), QStringLiteral("EC"),
-        QStringLiteral("-pkeyopt"), QStringLiteral("ec_paramgen_curve:P-256"),
-        QStringLiteral("-out"), path,
-    });
-
-    if (!result.success) {
-        error_message = result.error_message;
+    try {
+        const auto key = generate_private_key(
+            "EC",
+            "prime256v1",
+            QStringLiteral("Failed to generate EC private key"));
+        write_private_key_pem(key.get(), path, QStringLiteral("Failed to write EC private key"));
+        return true;
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
+        return false;
     }
-
-    return result.success;
 }
 
 bool security_materials::generate_x25519_private_key(const QString &path, QString &error_message) const
 {
-    const auto result = openssl_runner_ptr_->run({
-        QStringLiteral("genpkey"),
-        QStringLiteral("-algorithm"), QStringLiteral("X25519"),
-        QStringLiteral("-out"), path,
-    });
-
-    if (!result.success) {
-        error_message = result.error_message;
+    try {
+        const auto key = generate_private_key(
+            "X25519",
+            nullptr,
+            QStringLiteral("Failed to generate X25519 private key"));
+        write_private_key_pem(key.get(), path, QStringLiteral("Failed to write X25519 private key"));
+        return true;
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
+        return false;
     }
-
-    return result.success;
 }
 
 bool security_materials::generate_self_signed_ca(QString &error_message) const
 {
-    const auto result = openssl_runner_ptr_->run({
-        QStringLiteral("req"),
-        QStringLiteral("-x509"),
-        QStringLiteral("-new"),
-        QStringLiteral("-key"), app_paths_.ca_key_path(),
-        QStringLiteral("-sha256"),
-        QStringLiteral("-days"), QStringLiteral("36500"),
-        QStringLiteral("-subj"), QStringLiteral("/CN=shared-trusted-agent-ca"),
-        QStringLiteral("-out"), app_paths_.ca_certificate_path(),
-    });
+    try {
+        const auto key = load_private_key(
+            app_paths_.ca_key_path(),
+            QStringLiteral("Failed to load CA private key"));
+        x509_ptr certificate{X509_new(), X509_free};
+        if (certificate == nullptr) {
+            throw_security_error(QStringLiteral("Failed to allocate CA certificate"));
+        }
 
-    if (!result.success) {
-        error_message = result.error_message;
+        ensure_openssl_success(
+            X509_set_version(certificate.get(), 2L) == 1,
+            QStringLiteral("Failed to set CA certificate version"));
+        const auto serial = make_asn1_serial(1, QStringLiteral("Failed to create CA certificate serial"));
+        ensure_openssl_success(
+            X509_set_serialNumber(certificate.get(), serial.get()) == 1,
+            QStringLiteral("Failed to assign CA certificate serial"));
+        set_certificate_validity(certificate.get(), QStringLiteral("Failed to set CA certificate validity"));
+
+        auto *subject = X509_get_subject_name(certificate.get());
+        if (subject == nullptr) {
+            throw_security_error(QStringLiteral("Failed to get CA certificate subject"));
+        }
+        set_subject_common_name(
+            subject,
+            QStringLiteral("shared-trusted-agent-ca"),
+            QStringLiteral("Failed to set CA certificate subject"));
+        ensure_openssl_success(
+            X509_set_issuer_name(certificate.get(), subject) == 1,
+            QStringLiteral("Failed to set CA certificate issuer"));
+        ensure_openssl_success(
+            X509_set_pubkey(certificate.get(), key.get()) == 1,
+            QStringLiteral("Failed to set CA certificate public key"));
+        add_extension(
+            certificate.get(),
+            certificate.get(),
+            NID_basic_constraints,
+            "critical,CA:TRUE",
+            QStringLiteral("Failed to configure CA certificate basic constraints"));
+        add_extension(
+            certificate.get(),
+            certificate.get(),
+            NID_key_usage,
+            "critical,keyCertSign,cRLSign",
+            QStringLiteral("Failed to configure CA certificate key usage"));
+        add_extension(
+            certificate.get(),
+            certificate.get(),
+            NID_subject_key_identifier,
+            "hash",
+            QStringLiteral("Failed to configure CA certificate subject key identifier"));
+        ensure_openssl_success(
+            X509_sign(certificate.get(), key.get(), EVP_sha256()) > 0,
+            QStringLiteral("Failed to self-sign CA certificate"));
+
+        write_x509_pem(
+            certificate.get(),
+            app_paths_.ca_certificate_path(),
+            QStringLiteral("Failed to write CA certificate"));
+        return true;
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
+        return false;
     }
-
-    return result.success;
 }
 
 bool security_materials::generate_signed_certificate(
@@ -786,60 +1194,91 @@ bool security_materials::generate_signed_certificate(
     QString &error_message,
     const QString &csr_der_path) const
 {
-    QTemporaryDir temporary_dir{};
-    if (csr_der_path.isEmpty() && !temporary_dir.isValid()) {
-        error_message = QStringLiteral("Failed to create temporary directory for certificate request");
-        qCCritical(shared_security_materials_log) << error_message;
+    try {
+        const auto leaf_key = load_private_key(key_path, QStringLiteral("Failed to load leaf private key"));
+        const auto request = create_certificate_request(
+            leaf_key.get(),
+            subject_common_name,
+            QStringLiteral("Failed to create certificate request"));
+
+        if (!csr_der_path.isEmpty()) {
+            write_csr_der(
+                request.get(),
+                csr_der_path,
+                QStringLiteral("Failed to write certificate request"));
+        }
+
+        evp_pkey_ptr request_public_key{X509_REQ_get_pubkey(request.get()), EVP_PKEY_free};
+        if (request_public_key == nullptr) {
+            throw_security_error(QStringLiteral("Failed to extract certificate request public key"));
+        }
+
+        const auto ca_key = load_private_key(
+            app_paths_.ca_key_path(),
+            QStringLiteral("Failed to load CA private key for certificate signing"));
+        const auto ca_certificate = load_certificate(
+            app_paths_.ca_certificate_path(),
+            QStringLiteral("Failed to load CA certificate for certificate signing"));
+
+        x509_ptr certificate{X509_new(), X509_free};
+        if (certificate == nullptr) {
+            throw_security_error(QStringLiteral("Failed to allocate signed certificate"));
+        }
+
+        ensure_openssl_success(
+            X509_set_version(certificate.get(), 2L) == 1,
+            QStringLiteral("Failed to set signed certificate version"));
+        const auto serial = make_asn1_serial(
+            next_certificate_serial(app_paths_.ca_serial_path()),
+            QStringLiteral("Failed to create signed certificate serial"));
+        ensure_openssl_success(
+            X509_set_serialNumber(certificate.get(), serial.get()) == 1,
+            QStringLiteral("Failed to assign signed certificate serial"));
+        set_certificate_validity(certificate.get(), QStringLiteral("Failed to set signed certificate validity"));
+        ensure_openssl_success(
+            X509_set_issuer_name(certificate.get(), X509_get_subject_name(ca_certificate.get())) == 1,
+            QStringLiteral("Failed to set signed certificate issuer"));
+        ensure_openssl_success(
+            X509_set_subject_name(certificate.get(), X509_REQ_get_subject_name(request.get())) == 1,
+            QStringLiteral("Failed to set signed certificate subject"));
+        ensure_openssl_success(
+            X509_set_pubkey(certificate.get(), request_public_key.get()) == 1,
+            QStringLiteral("Failed to set signed certificate public key"));
+        add_extension(
+            certificate.get(),
+            ca_certificate.get(),
+            NID_basic_constraints,
+            "critical,CA:FALSE",
+            QStringLiteral("Failed to configure signed certificate basic constraints"));
+        add_extension(
+            certificate.get(),
+            ca_certificate.get(),
+            NID_key_usage,
+            "critical,digitalSignature,keyAgreement",
+            QStringLiteral("Failed to configure signed certificate key usage"));
+        add_extension(
+            certificate.get(),
+            ca_certificate.get(),
+            NID_ext_key_usage,
+            "serverAuth,clientAuth",
+            QStringLiteral("Failed to configure signed certificate extended key usage"));
+        ensure_openssl_success(
+            X509_sign(certificate.get(), ca_key.get(), EVP_sha256()) > 0,
+            QStringLiteral("Failed to sign certificate"));
+
+        write_x509_pem(
+            certificate.get(),
+            certificate_path,
+            QStringLiteral("Failed to write signed certificate PEM"));
+        write_x509_der(
+            certificate.get(),
+            certificate_der_path,
+            QStringLiteral("Failed to write signed certificate DER"));
+        return true;
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
         return false;
     }
-
-    const auto effective_csr_path = csr_der_path.isEmpty()
-        ? temporary_dir.filePath(QStringLiteral("request.csr.der"))
-        : csr_der_path;
-
-    const auto csr_result = openssl_runner_ptr_->run({
-        QStringLiteral("req"),
-        QStringLiteral("-new"),
-        QStringLiteral("-key"), key_path,
-        QStringLiteral("-subj"), openssl_subject(subject_common_name),
-        QStringLiteral("-outform"), QStringLiteral("DER"),
-        QStringLiteral("-out"), effective_csr_path,
-    });
-    if (!csr_result.success) {
-        error_message = csr_result.error_message;
-        return false;
-    }
-
-    const auto cert_result = openssl_runner_ptr_->run({
-        QStringLiteral("x509"),
-        QStringLiteral("-req"),
-        QStringLiteral("-inform"), QStringLiteral("DER"),
-        QStringLiteral("-in"), effective_csr_path,
-        QStringLiteral("-CA"), app_paths_.ca_certificate_path(),
-        QStringLiteral("-CAkey"), app_paths_.ca_key_path(),
-        QStringLiteral("-CAcreateserial"),
-        QStringLiteral("-CAserial"), app_paths_.ca_serial_path(),
-        QStringLiteral("-out"), certificate_path,
-        QStringLiteral("-days"), QStringLiteral("36500"),
-        QStringLiteral("-sha256"),
-    });
-    if (!cert_result.success) {
-        error_message = cert_result.error_message;
-        return false;
-    }
-
-    const auto der_result = openssl_runner_ptr_->run({
-        QStringLiteral("x509"),
-        QStringLiteral("-in"), certificate_path,
-        QStringLiteral("-outform"), QStringLiteral("DER"),
-        QStringLiteral("-out"), certificate_der_path,
-    });
-    if (!der_result.success) {
-        error_message = der_result.error_message;
-        return false;
-    }
-
-    return true;
 }
 
 bool security_materials::write_peer_list(const shared::v1::PeerList &peer_list, QString &error_message) const
@@ -971,38 +1410,43 @@ QByteArray security_materials::sign_peer_list_payload(
     const shared::v1::PeerListToSign &peer_list_to_sign,
     QString &error_message) const
 {
-    QTemporaryDir temporary_dir{};
-    if (!temporary_dir.isValid()) {
-        error_message = QStringLiteral("Failed to create temporary signing directory");
-        return {};
-    }
-
     QProtobufSerializer serializer{};
     const auto payload = peer_list_to_sign.serialize(&serializer);
 
-    const auto payload_path = temporary_dir.filePath(QStringLiteral("peer-list.bin"));
-    const auto signature_path = temporary_dir.filePath(QStringLiteral("peer-list.sig"));
+    try {
+        const auto key = load_private_key(
+            app_paths_.ca_key_path(),
+            QStringLiteral("Failed to load CA private key for peer-list signing"));
+        evp_md_ctx_ptr context{EVP_MD_CTX_new(), EVP_MD_CTX_free};
+        if (context == nullptr) {
+            throw_security_error(QStringLiteral("Failed to allocate peer-list signing context"));
+        }
 
-    QFile payload_file{payload_path};
-    ensure_file_open(payload_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open peer-list payload file"));
-    ensure_write(payload_file, payload, QStringLiteral("Failed to write peer-list payload file"));
-    payload_file.close();
+        ensure_openssl_success(
+            EVP_DigestSignInit(context.get(), nullptr, EVP_sha256(), nullptr, key.get()) == 1,
+            QStringLiteral("Failed to initialize peer-list signing"));
+        ensure_openssl_success(
+            EVP_DigestSignUpdate(context.get(), payload.constData(), static_cast<size_t>(payload.size())) == 1,
+            QStringLiteral("Failed to feed peer-list payload into signing"));
 
-    const auto result = openssl_runner_ptr_->run({
-        QStringLiteral("dgst"),
-        QStringLiteral("-sha256"),
-        QStringLiteral("-sign"), app_paths_.ca_key_path(),
-        QStringLiteral("-out"), signature_path,
-        payload_path,
-    });
-    if (!result.success) {
-        error_message = result.error_message;
+        size_t signature_size{};
+        ensure_openssl_success(
+            EVP_DigestSignFinal(context.get(), nullptr, &signature_size) == 1,
+            QStringLiteral("Failed to measure peer-list signature"));
+
+        QByteArray signature(static_cast<qsizetype>(signature_size), Qt::Uninitialized);
+        ensure_openssl_success(
+            EVP_DigestSignFinal(
+                context.get(),
+                reinterpret_cast<unsigned char *>(signature.data()),
+                &signature_size) == 1,
+            QStringLiteral("Failed to finalize peer-list signature"));
+        signature.resize(static_cast<qsizetype>(signature_size));
+        return signature;
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
         return {};
     }
-
-    QFile signature_file{signature_path};
-    ensure_file_open(signature_file, QIODevice::ReadOnly, QStringLiteral("Failed to open peer-list signature file"));
-    return signature_file.readAll();
 }
 
 QByteArray security_materials::raw_x25519_public_key(const QString &private_key_path, QString &error_message) const

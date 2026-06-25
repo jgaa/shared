@@ -28,21 +28,21 @@ add_library(sharedcore STATIC
     include/shared/desktop/core/log_capture.h
     include/shared/desktop/core/logging.h
     include/shared/desktop/core/logging_controller.h
-    include/shared/desktop/core/openssl_runner.h
     include/shared/desktop/core/pending_enrollment_repository.h
     include/shared/desktop/core/security_materials.h
     include/shared/desktop/core/settings_repository.h
+    include/shared/desktop/core/transfer_crypto.h
     src/address_hint_repository.cpp
     src/configuration_repository.cpp
     src/enrollment_client.cpp
     src/envelope_io.cpp
     src/log_capture.cpp
     src/logging_controller.cpp
-    src/openssl_runner.cpp
     src/pending_enrollment_repository.cpp
     src/security_materials.cpp
     src/app_paths.cpp
     src/settings_repository.cpp
+    src/transfer_crypto.cpp
 )
 
 target_include_directories(sharedcore PUBLIC

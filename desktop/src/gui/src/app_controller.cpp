@@ -1,10 +1,14 @@
 #include "app_controller.h"
 
+#include "daemon_application.h"
+
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/log_capture.h"
 
 #include <exception>
 #include <QtConcurrent/QtConcurrentRun>
+#include <QtGui/QClipboard>
+#include <QtGui/QGuiApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QFile>
 #include <QtCore/QJsonArray>
@@ -15,9 +19,12 @@
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QSettings>
 #include <QtCore/QSysInfo>
+#include <QtCore/QUrl>
 #include <QtCore/QVariantMap>
 #include <QtCore/QtNumeric>
+#include <QtNetwork/QSslSocket>
 #include <algorithm>
+#include <QtWidgets/QFileDialog>
 #include <stdexcept>
 
 namespace shared::desktop::gui {
@@ -73,6 +80,26 @@ int bounded_port(int value)
     return qBound(1, value, 65535);
 }
 
+QStringList normalized_local_file_paths(const QStringList &paths)
+{
+    QStringList normalized{};
+    for (const auto &path : paths) {
+        if (path.isEmpty()) {
+            continue;
+        }
+
+        const QUrl url{path};
+        if (url.isValid() && url.isLocalFile()) {
+            normalized.append(url.toLocalFile());
+            continue;
+        }
+
+        normalized.append(path);
+    }
+
+    return normalized;
+}
+
 }
 
 app_controller::app_controller(QObject *parent)
@@ -96,9 +123,48 @@ app_controller::app_controller(QObject *parent)
     reload_state();
 }
 
+void app_controller::set_service(daemon::daemon_application *service)
+{
+    service_ = service;
+    if (service_ == nullptr) {
+        return;
+    }
+
+    connect(
+        service_,
+        &daemon::daemon_application::clipboard_approval_requested,
+        this,
+        &app_controller::handle_clipboard_approval_requested);
+    connect(
+        service_,
+        &daemon::daemon_application::clipboard_text_received,
+        this,
+        &app_controller::handle_clipboard_text_received);
+    connect(
+        service_,
+        &daemon::daemon_application::clipboard_transfer_status,
+        this,
+        &app_controller::handle_clipboard_transfer_status);
+    connect(
+        service_,
+        &daemon::daemon_application::file_approval_requested,
+        this,
+        &app_controller::handle_file_approval_requested);
+    connect(
+        service_,
+        &daemon::daemon_application::file_received,
+        this,
+        &app_controller::handle_file_received);
+    connect(
+        service_,
+        &daemon::daemon_application::file_transfer_status,
+        this,
+        &app_controller::handle_file_transfer_status);
+}
+
 QString app_controller::app_name() const
 {
-    return core::app_metadata::organization_name;
+    return core::app_metadata::application_display_name;
 }
 
 QString app_controller::application_version() const
@@ -109,6 +175,12 @@ QString app_controller::application_version() const
 QString app_controller::qt_version() const
 {
     return QString::fromLatin1(qVersion());
+}
+
+QString app_controller::openssl_library_version() const
+{
+    const auto version = QSslSocket::sslLibraryVersionString().trimmed();
+    return version.isEmpty() ? QStringLiteral("Unavailable") : version;
 }
 
 QString app_controller::build_abi() const
@@ -196,6 +268,14 @@ QVariantList app_controller::verified_peers() const
     return verified_peers_;
 }
 
+bool app_controller::copy_targets_available() const
+{
+    return std::any_of(verified_peers_.cbegin(), verified_peers_.cend(), [](const auto &peer) {
+        const auto row = peer.toMap();
+        return row.value(QStringLiteral("status_label")).toString() != QStringLiteral("Unavailable");
+    });
+}
+
 QString app_controller::last_error() const
 {
     return last_error_;
@@ -220,6 +300,21 @@ QVariantList app_controller::pending_requests() const
 int app_controller::clipboard_limit_megabytes() const
 {
     return clipboard_limit_megabytes_;
+}
+
+bool app_controller::auto_accept_clipboard() const
+{
+    return settings_repository_.auto_accept_clipboard();
+}
+
+bool app_controller::auto_accept_files() const
+{
+    return settings_repository_.auto_accept_files();
+}
+
+QString app_controller::download_path() const
+{
+    return settings_repository_.download_path();
 }
 
 QString app_controller::status_text() const
@@ -300,6 +395,51 @@ QString app_controller::join_verification_code() const
     return pending_join_verification_code_;
 }
 
+bool app_controller::clipboard_approval_pending() const
+{
+    return !clipboard_approval_transfer_id_.isEmpty();
+}
+
+QString app_controller::clipboard_approval_sender_name() const
+{
+    return clipboard_approval_sender_name_;
+}
+
+QString app_controller::clipboard_approval_transfer_id() const
+{
+    return clipboard_approval_transfer_id_;
+}
+
+qulonglong app_controller::clipboard_approval_size_bytes() const
+{
+    return clipboard_approval_size_bytes_;
+}
+
+bool app_controller::file_approval_pending() const
+{
+    return !file_approval_transfer_id_.isEmpty();
+}
+
+QString app_controller::file_approval_sender_name() const
+{
+    return file_approval_sender_name_;
+}
+
+QString app_controller::file_approval_transfer_id() const
+{
+    return file_approval_transfer_id_;
+}
+
+QString app_controller::file_approval_filename() const
+{
+    return file_approval_filename_;
+}
+
+qulonglong app_controller::file_approval_size_bytes() const
+{
+    return file_approval_size_bytes_;
+}
+
 void app_controller::set_clipboard_limit_megabytes(int value)
 {
     const auto bounded_value = qBound(
@@ -314,6 +454,33 @@ void app_controller::set_clipboard_limit_megabytes(int value)
     clipboard_limit_megabytes_ = bounded_value;
     settings_repository_.set_clipboard_limit_bytes(clipboard_limit_megabytes_ * bytes_per_megabyte);
     emit clipboard_limit_megabytes_changed();
+}
+
+void app_controller::set_auto_accept_clipboard(bool value)
+{
+    if (settings_repository_.auto_accept_clipboard() == value) {
+        return;
+    }
+    settings_repository_.set_auto_accept_clipboard(value);
+    emit transfer_settings_changed();
+}
+
+void app_controller::set_auto_accept_files(bool value)
+{
+    if (settings_repository_.auto_accept_files() == value) {
+        return;
+    }
+    settings_repository_.set_auto_accept_files(value);
+    emit transfer_settings_changed();
+}
+
+void app_controller::set_download_path(const QString &value)
+{
+    if (settings_repository_.download_path() == value.trimmed()) {
+        return;
+    }
+    settings_repository_.set_download_path(value);
+    emit transfer_settings_changed();
 }
 
 void app_controller::set_local_enrollment_host(const QString &value)
@@ -614,6 +781,191 @@ void app_controller::reject_pending_request(const QString &request_id)
     }
 }
 
+bool app_controller::send_clipboard_to_all()
+{
+    if (service_ == nullptr) {
+        set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    QStringList peer_ids{};
+    for (const auto &peer : verified_peers_) {
+        const auto row = peer.toMap();
+        if (row.value(QStringLiteral("peer_id")).toString().isEmpty()) {
+            continue;
+        }
+        peer_ids.append(row.value(QStringLiteral("peer_id")).toString());
+    }
+
+    if (peer_ids.isEmpty()) {
+        set_last_error(QStringLiteral("No verified peers are available"));
+        return false;
+    }
+
+    const auto clipboard_text = QGuiApplication::clipboard()->text();
+    QString error_message{};
+    if (!service_->send_clipboard_text(peer_ids, clipboard_text, error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    set_last_error({});
+    return true;
+}
+
+bool app_controller::send_clipboard_to_peer(const QString &peer_id)
+{
+    if (service_ == nullptr) {
+        set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->send_clipboard_text({peer_id}, QGuiApplication::clipboard()->text(), error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    set_last_error({});
+    return true;
+}
+
+QStringList app_controller::select_files()
+{
+    QFileDialog dialog{};
+    dialog.setFileMode(QFileDialog::ExistingFiles);
+    dialog.setOption(QFileDialog::DontUseNativeDialog, false);
+    dialog.setDirectory(download_path());
+    dialog.setWindowTitle(QStringLiteral("Select Files to Send"));
+    if (dialog.exec() != QDialog::Accepted) {
+        return {};
+    }
+
+    return dialog.selectedFiles();
+}
+
+bool app_controller::send_files_to_all(const QStringList &file_paths)
+{
+    if (service_ == nullptr) {
+        set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    QStringList peer_ids{};
+    for (const auto &peer : verified_peers_) {
+        const auto row = peer.toMap();
+        const auto peer_id = row.value(QStringLiteral("peer_id")).toString();
+        if (!peer_id.isEmpty()) {
+            peer_ids.append(peer_id);
+        }
+    }
+
+    if (peer_ids.isEmpty()) {
+        set_last_error(QStringLiteral("No verified peers are available"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->send_files(peer_ids, normalized_local_file_paths(file_paths), error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    set_last_error({});
+    return true;
+}
+
+bool app_controller::send_files_to_peer(const QString &peer_id, const QStringList &file_paths)
+{
+    if (service_ == nullptr) {
+        set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->send_files({peer_id}, normalized_local_file_paths(file_paths), error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    set_last_error({});
+    return true;
+}
+
+bool app_controller::approve_clipboard_transfer()
+{
+    if (service_ == nullptr || clipboard_approval_transfer_id_.isEmpty()) {
+        set_last_error(QStringLiteral("No clipboard approval is pending"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->approve_clipboard_transfer(clipboard_approval_transfer_id_, error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    clear_pending_clipboard_approval();
+    return true;
+}
+
+bool app_controller::reject_clipboard_transfer()
+{
+    if (service_ == nullptr || clipboard_approval_transfer_id_.isEmpty()) {
+        set_last_error(QStringLiteral("No clipboard approval is pending"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->reject_clipboard_transfer(
+            clipboard_approval_transfer_id_,
+            QStringLiteral("Clipboard transfer rejected by receiver"),
+            error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    clear_pending_clipboard_approval();
+    return true;
+}
+
+bool app_controller::approve_file_transfer()
+{
+    if (service_ == nullptr || file_approval_transfer_id_.isEmpty()) {
+        set_last_error(QStringLiteral("No file approval is pending"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->approve_file_transfer(file_approval_transfer_id_, error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    clear_pending_file_approval();
+    return true;
+}
+
+bool app_controller::reject_file_transfer()
+{
+    if (service_ == nullptr || file_approval_transfer_id_.isEmpty()) {
+        set_last_error(QStringLiteral("No file approval is pending"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->reject_file_transfer(
+            file_approval_transfer_id_,
+            QStringLiteral("File transfer rejected by receiver"),
+            error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    clear_pending_file_approval();
+    return true;
+}
+
 void app_controller::set_last_error(const QString &message)
 {
     if (!message.isEmpty()) {
@@ -802,6 +1154,159 @@ void app_controller::finish_join_request()
         set_last_error(QString::fromUtf8(exception.what()));
         emit state_changed();
     }
+}
+
+void app_controller::handle_clipboard_approval_requested(
+    const QString &transfer_id,
+    const QString &sender_peer_id,
+    const QString &sender_name,
+    quint64 size_bytes)
+{
+    clipboard_approval_transfer_id_ = transfer_id;
+    clipboard_approval_sender_peer_id_ = sender_peer_id;
+    clipboard_approval_sender_name_ = sender_name;
+    clipboard_approval_size_bytes_ = size_bytes;
+    qCInfo(shared_gui_app_controller_log)
+        << "Clipboard approval requested"
+        << "transfer_id=" << transfer_id
+        << "sender=" << sender_name
+        << "size=" << size_bytes;
+    emit clipboard_approval_changed();
+}
+
+void app_controller::handle_clipboard_text_received(
+    const QString &sender_peer_id,
+    const QString &sender_name,
+    const QString &text)
+{
+    Q_UNUSED(sender_peer_id)
+
+    QGuiApplication::clipboard()->setText(text);
+    qCInfo(shared_gui_app_controller_log)
+        << "Clipboard text received"
+        << "sender=" << sender_name
+        << "bytes=" << text.toUtf8().size();
+    clear_pending_clipboard_approval();
+    set_last_error(QStringLiteral("Clipboard received from %1").arg(sender_name));
+}
+
+void app_controller::handle_clipboard_transfer_status(
+    const QString &transfer_id,
+    const QString &peer_id,
+    const QString &peer_name,
+    int status,
+    const QString &message)
+{
+    Q_UNUSED(transfer_id)
+    Q_UNUSED(peer_id)
+
+    qCInfo(shared_gui_app_controller_log)
+        << "Clipboard transfer status"
+        << "transfer_id=" << transfer_id
+        << "peer=" << peer_name
+        << "status=" << status
+        << "message=" << message;
+
+    if (transfer_id == clipboard_approval_transfer_id_) {
+        clear_pending_clipboard_approval();
+    }
+
+    if (!message.isEmpty()) {
+        set_last_error(QStringLiteral("%1: %2").arg(peer_name, message));
+    }
+}
+
+void app_controller::handle_file_approval_requested(
+    const QString &transfer_id,
+    const QString &sender_peer_id,
+    const QString &sender_name,
+    const QString &filename,
+    quint64 size_bytes)
+{
+    file_approval_transfer_id_ = transfer_id;
+    file_approval_sender_peer_id_ = sender_peer_id;
+    file_approval_sender_name_ = sender_name;
+    file_approval_filename_ = filename;
+    file_approval_size_bytes_ = size_bytes;
+    emit file_approval_changed();
+}
+
+void app_controller::handle_file_received(
+    const QString &sender_peer_id,
+    const QString &sender_name,
+    const QString &filename,
+    const QString &saved_path,
+    quint64 size_bytes)
+{
+    Q_UNUSED(sender_peer_id)
+    Q_UNUSED(size_bytes)
+
+    clear_pending_file_approval();
+    qCInfo(shared_gui_app_controller_log)
+        << "File received"
+        << "sender=" << sender_name
+        << "filename=" << filename
+        << "saved_path=" << saved_path;
+    set_last_error(QStringLiteral("Received %1 from %2").arg(filename, sender_name));
+}
+
+void app_controller::handle_file_transfer_status(
+    const QString &transfer_id,
+    const QString &peer_id,
+    const QString &peer_name,
+    int status,
+    const QString &message)
+{
+    Q_UNUSED(peer_id)
+
+    qCInfo(shared_gui_app_controller_log)
+        << "File transfer status"
+        << "transfer_id=" << transfer_id
+        << "peer=" << peer_name
+        << "status=" << status
+        << "message=" << message;
+
+    if (transfer_id == file_approval_transfer_id_) {
+        clear_pending_file_approval();
+    }
+
+    if (!message.isEmpty()) {
+        set_last_error(QStringLiteral("%1: %2").arg(peer_name, message));
+    }
+}
+
+void app_controller::clear_pending_clipboard_approval()
+{
+    if (clipboard_approval_transfer_id_.isEmpty()
+        && clipboard_approval_sender_peer_id_.isEmpty()
+        && clipboard_approval_sender_name_.isEmpty()
+        && clipboard_approval_size_bytes_ == 0) {
+        return;
+    }
+
+    clipboard_approval_transfer_id_.clear();
+    clipboard_approval_sender_peer_id_.clear();
+    clipboard_approval_sender_name_.clear();
+    clipboard_approval_size_bytes_ = 0;
+    emit clipboard_approval_changed();
+}
+
+void app_controller::clear_pending_file_approval()
+{
+    if (file_approval_transfer_id_.isEmpty()
+        && file_approval_sender_peer_id_.isEmpty()
+        && file_approval_sender_name_.isEmpty()
+        && file_approval_filename_.isEmpty()
+        && file_approval_size_bytes_ == 0) {
+        return;
+    }
+
+    file_approval_transfer_id_.clear();
+    file_approval_sender_peer_id_.clear();
+    file_approval_sender_name_.clear();
+    file_approval_filename_.clear();
+    file_approval_size_bytes_ = 0;
+    emit file_approval_changed();
 }
 
 QString app_controller::format_elapsed(qint64 last_communication_time_ms) const

@@ -1,0 +1,50 @@
+app-id: eu.lastviking.shared
+runtime: org.kde.Platform
+runtime-version: "6.10"
+sdk: org.kde.Sdk
+
+command: sharedgui
+
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --filesystem=home
+
+modules:
+  - name: shared
+    buildsystem: simple
+    build-commands:
+      - |
+        app_version="$(sed -nE 's/^project\(shared_desktop VERSION ([^ ]+) LANGUAGES CXX\)$/\1/p' desktop/CMakeLists.txt)"
+        test -n "${app_version}"
+        cmake -S desktop -B _build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/app \
+          -DCMAKE_PREFIX_PATH=/app \
+          -DBUILD_TESTING=OFF \
+          -DSHARED_BUILD_HEADLESS=OFF \
+          -DSHARED_FLATPAK_BUILD=ON \
+          -DSHARED_QCORO_SOURCE_DIR="$(pwd)/third_party/qcoro" \
+          -DSHARED_LOGFAULT_SOURCE_DIR="$(pwd)/third_party/logfault"
+      - cmake --build _build --parallel
+      - |
+        app_version="$(sed -nE 's/^project\(shared_desktop VERSION ([^ ]+) LANGUAGES CXX\)$/\1/p' desktop/CMakeLists.txt)"
+        sed "s/@APP_VERSION@/${app_version}/g" \
+          flatpak/local.shared.Shared.metainfo.xml.in > eu.lastviking.shared.metainfo.xml
+      - install -Dm755 _build/bin/sharedgui /app/bin/sharedgui
+      - install -Dm644 flatpak/local.shared.Shared.desktop /app/share/applications/eu.lastviking.shared.desktop
+      - install -Dm644 flatpak/local.shared.Shared.svg /app/share/icons/hicolor/scalable/apps/eu.lastviking.shared.svg
+      - install -Dm644 eu.lastviking.shared.metainfo.xml /app/share/metainfo/eu.lastviking.shared.metainfo.xml
+    sources:
+      - type: dir
+        path: ..
+      - type: git
+        url: https://github.com/qcoro/qcoro.git
+        tag: v0.13.0
+        dest: third_party/qcoro
+      - type: git
+        url: https://github.com/jgaa/logfault.git
+        tag: v0.8.5
+        dest: third_party/logfault
