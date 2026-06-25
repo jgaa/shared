@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.28)
 
 project(shared_desktop VERSION 0.1.0 LANGUAGES CXX)
 
+option(SHARED_BUILD_GUI "Build the Qt/QML desktop UI" ON)
+option(SHARED_BUILD_HEADLESS "Build the headless service frontend" ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -50,18 +53,31 @@ set(QCORO_WITH_QTTEST OFF CACHE BOOL "Disable unused QCoro QtTest support" FORCE
 FetchContent_MakeAvailable(qcoro)
 
 find_package(Qt6 6.10 REQUIRED COMPONENTS
-    Concurrent
     Core
     Core5Compat
-    Gui
     Network
     Protobuf
     ProtobufTools
-    Qml
-    Quick
-    QuickControls2
-    Test
 )
+
+set(shared_qt_optional_components)
+if(SHARED_BUILD_GUI)
+    list(APPEND shared_qt_optional_components
+        Concurrent
+        Gui
+        Qml
+        Quick
+        QuickControls2
+    )
+endif()
+
+if(BUILD_TESTING)
+    list(APPEND shared_qt_optional_components Test)
+endif()
+
+if(shared_qt_optional_components)
+    find_package(Qt6 6.10 REQUIRED COMPONENTS ${shared_qt_optional_components})
+endif()
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 
@@ -73,7 +89,9 @@ include(shared_common)
 
 add_subdirectory(src/core)
 add_subdirectory(src/daemon)
-add_subdirectory(src/gui)
+if(SHARED_BUILD_GUI)
+    add_subdirectory(src/gui)
+endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

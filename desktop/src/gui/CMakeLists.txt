@@ -1,10 +1,13 @@
-qt_add_executable(sharedgui
+add_library(sharedui STATIC
     src/app_controller.h
     src/app_controller.cpp
-    src/main.cpp
 )
 
-qt_add_qml_module(sharedgui
+target_include_directories(sharedui PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+qt_add_qml_module(sharedui
     URI Shared.Gui
     VERSION 1.0
     QML_FILES
@@ -16,13 +19,32 @@ qt_add_qml_module(sharedgui
         qml/SettingsDialog.qml
 )
 
-target_link_libraries(sharedgui PRIVATE
+target_link_libraries(sharedui PUBLIC
     Qt6::Concurrent
     Qt6::Core
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    sharedservice
+    sharedcore
+)
+
+shared_set_common_target_options(sharedui)
+
+qt_add_executable(sharedgui
+    src/main.cpp
+)
+
+target_link_libraries(sharedgui PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    sharedui
+    shareduiplugin
+    shareduiplugin_init
     sharedcore
 )
 

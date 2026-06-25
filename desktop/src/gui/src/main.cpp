@@ -1,4 +1,5 @@
 #include "app_controller.h"
+#include "daemon_application.h"
 
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/logging.h"
@@ -88,8 +89,19 @@ int main(int argc, char *argv[])
     LOG_INFO << "Starting shared GUI";
     LOG_INFO << "Settings file: " << logging_controller.settings_file_path().toStdString();
 
+    shared::desktop::daemon::daemon_application service{};
+    if (!service.start()) {
+        LOG_ERROR << "Failed to start shared background services";
+        return 1;
+    }
+
     QQmlApplicationEngine engine{};
     shared::desktop::gui::app_controller controller{};
+    QObject::connect(
+        &controller,
+        &shared::desktop::gui::app_controller::configuration_changed,
+        &service,
+        &shared::desktop::daemon::daemon_application::apply_configuration_change);
     engine.rootContext()->setContextProperty(QStringLiteral("app_controller"), &controller);
 
     QObject::connect(

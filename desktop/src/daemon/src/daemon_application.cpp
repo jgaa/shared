@@ -33,6 +33,12 @@ bool daemon_application::start()
     return true;
 }
 
+void daemon_application::apply_configuration_change()
+{
+    qCInfo(shared_daemon_log) << "configuration change notification received";
+    reload_configuration();
+}
+
 void daemon_application::reload_configuration()
 {
     core::agent_configuration next_configuration{};

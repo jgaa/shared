@@ -124,6 +124,7 @@ public:
 
 signals:
     void clipboard_limit_megabytes_changed();
+    void configuration_changed();
     void logging_settings_changed();
     void log_lines_changed();
     void peers_changed();

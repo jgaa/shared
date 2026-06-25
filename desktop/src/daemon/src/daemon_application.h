@@ -20,6 +20,7 @@ public:
     explicit daemon_application(QObject *parent = nullptr);
 
     [[nodiscard]] bool start();
+    void apply_configuration_change();
 
 private slots:
     void reload_configuration();

@@ -324,17 +324,21 @@ void app_controller::set_local_enrollment_host(const QString &value)
         return;
     }
 
-    save_configuration_field([&host](auto &configuration) {
+    if (!save_configuration_field([&host](auto &configuration) {
         configuration.enrollment_host = host;
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_local_enrollment_port(int value)
 {
     const auto port = bounded_port(value);
-    save_configuration_field([port](auto &configuration) {
+    if (!save_configuration_field([port](auto &configuration) {
         configuration.enrollment_port = static_cast<quint16>(port);
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_local_peer_host(const QString &value)
@@ -345,41 +349,51 @@ void app_controller::set_local_peer_host(const QString &value)
         return;
     }
 
-    save_configuration_field([&host](auto &configuration) {
+    if (!save_configuration_field([&host](auto &configuration) {
         configuration.peer_host = host;
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_local_peer_port(int value)
 {
     const auto port = bounded_port(value);
-    save_configuration_field([port](auto &configuration) {
+    if (!save_configuration_field([port](auto &configuration) {
         configuration.peer_port = static_cast<quint16>(port);
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_trusted_agent_host(const QString &value)
 {
     const auto host = value.trimmed();
-    save_configuration_field([&host](auto &configuration) {
+    if (!save_configuration_field([&host](auto &configuration) {
         configuration.trusted_agent.host = host;
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_trusted_agent_port(int value)
 {
     const auto port = bounded_port(value);
-    save_configuration_field([port](auto &configuration) {
+    if (!save_configuration_field([port](auto &configuration) {
         configuration.trusted_agent.port = static_cast<quint16>(port);
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_trusted_agent_peer_port(int value)
 {
     const auto port = bounded_port(value);
-    save_configuration_field([port](auto &configuration) {
+    if (!save_configuration_field([port](auto &configuration) {
         configuration.trusted_agent.peer_port = static_cast<quint16>(port);
-    });
+    })) {
+        return;
+    }
 }
 
 void app_controller::set_app_log_level(int value)
@@ -446,6 +460,7 @@ bool app_controller::initialize_local_trusted_agent(const QString &name, int enr
         configuration_repository_.save(configuration_);
         trusted_agent_fingerprint_ = result.enrollment_fingerprint;
         qCInfo(shared_gui_app_controller_log) << "Trusted agent initialized" << configuration_.peer_id << configuration_.enrollment_port;
+        emit configuration_changed();
         emit state_changed();
         return true;
     } catch (const std::exception &exception) {
@@ -616,6 +631,7 @@ bool app_controller::save_configuration_field(std::function<void(core::agent_con
         update(next_configuration);
         configuration_repository_.save(next_configuration);
         configuration_ = next_configuration;
+        emit configuration_changed();
         emit state_changed();
         return true;
     } catch (const std::exception &exception) {
@@ -776,6 +792,7 @@ void app_controller::finish_join_request()
 
         qCInfo(shared_gui_app_controller_log) << "Join trusted agent succeeded";
         reload_state();
+        emit configuration_changed();
         emit state_changed();
     } catch (const std::exception &exception) {
         pending_join_enrollment_.reset();
