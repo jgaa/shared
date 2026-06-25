@@ -9,6 +9,7 @@
 #include <QtCore/QFile>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QSaveFile>
+#include <QtCore/QSet>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QUuid>
 #include <QtNetwork/QSslCertificate>
@@ -16,6 +17,7 @@
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/x509.h>
 
 #include <exception>
 #include <stdexcept>
@@ -52,6 +54,24 @@ qint64 to_epoch_ms(const QDateTime &time)
     return time.toUTC().toMSecsSinceEpoch();
 }
 
+QByteArray peer_list_payload_bytes(const shared::v1::PeerList &peer_list)
+{
+    shared::v1::PeerListToSign payload{};
+    payload.setVersion(peer_list.version());
+    payload.setCreatedTimeMs(peer_list.createdTimeMs());
+    payload.setTrustedAgentPeerId(peer_list.trustedAgentPeerId());
+    payload.setPeers(peer_list.peers());
+
+    QProtobufSerializer serializer{};
+    return payload.serialize(&serializer);
+}
+
+QByteArray serialize_peer_list(const shared::v1::PeerList &peer_list)
+{
+    QProtobufSerializer serializer{};
+    return peer_list.serialize(&serializer);
+}
+
 QString format_short_hex_groups(const QString &value)
 {
     if (value.size() != 8) {
@@ -59,6 +79,44 @@ QString format_short_hex_groups(const QString &value)
     }
 
     return value.first(4) + QLatin1Char('-') + value.sliced(4, 4);
+}
+
+QString normalized_peer_name(const QString &value)
+{
+    return value.trimmed().toCaseFolded();
+}
+
+bool validate_peer_entries(const QList<shared::v1::PeerListEntry> &entries, QString &error_message)
+{
+    QSet<QString> peer_ids{};
+    QSet<QString> peer_names{};
+    for (const auto &entry : entries) {
+        const auto peer_id = entry.identity().peerId().uuid().trimmed();
+        if (peer_id.isEmpty()) {
+            error_message = QStringLiteral("Peer list contains an entry without a peer id");
+            return false;
+        }
+
+        if (peer_ids.contains(peer_id)) {
+            error_message = QStringLiteral("Peer list contains duplicate peer ids");
+            return false;
+        }
+        peer_ids.insert(peer_id);
+
+        const auto peer_name = normalized_peer_name(entry.identity().name());
+        if (peer_name.isEmpty()) {
+            error_message = QStringLiteral("Peer list contains an entry without a name");
+            return false;
+        }
+
+        if (peer_names.contains(peer_name)) {
+            error_message = QStringLiteral("Peer list contains duplicate peer names");
+            return false;
+        }
+        peer_names.insert(peer_name);
+    }
+
+    return true;
 }
 
 [[noreturn]] void throw_security_error(const QString &message)
@@ -100,6 +158,64 @@ void remove_if_exists(const QString &path, const QString &message)
     if (!QFile::remove(path) && QFile::exists(path)) {
         throw_security_error(message);
     }
+}
+
+QByteArray read_file_bytes(const QString &path, const QString &message)
+{
+    QFile file{path};
+    if (!file.open(QIODevice::ReadOnly)) {
+        throw_security_error(message + QStringLiteral(": ") + file.errorString());
+    }
+
+    return file.readAll();
+}
+
+bool verify_peer_list_signature(
+    const QByteArray &certificate_der,
+    const QByteArray &payload,
+    const QByteArray &signature,
+    QString &error_message)
+{
+    const unsigned char *certificate_data =
+        reinterpret_cast<const unsigned char *>(certificate_der.constData());
+    X509 *certificate = d2i_X509(nullptr, &certificate_data, certificate_der.size());
+    if (certificate == nullptr) {
+        error_message = QStringLiteral("Failed to parse trusted-agent certificate");
+        return false;
+    }
+
+    EVP_PKEY *public_key = X509_get_pubkey(certificate);
+    X509_free(certificate);
+    if (public_key == nullptr) {
+        error_message = QStringLiteral("Failed to extract trusted-agent public key");
+        return false;
+    }
+
+    EVP_MD_CTX *context = EVP_MD_CTX_new();
+    if (context == nullptr) {
+        EVP_PKEY_free(public_key);
+        error_message = QStringLiteral("Failed to allocate OpenSSL digest context");
+        return false;
+    }
+
+    auto verified = false;
+    if (EVP_DigestVerifyInit(context, nullptr, EVP_sha256(), nullptr, public_key) == 1
+        && EVP_DigestVerifyUpdate(context, payload.constData(), payload.size()) == 1
+        && EVP_DigestVerifyFinal(
+            context,
+            reinterpret_cast<const unsigned char *>(signature.constData()),
+            static_cast<size_t>(signature.size())) == 1) {
+        verified = true;
+    }
+
+    EVP_MD_CTX_free(context);
+    EVP_PKEY_free(public_key);
+
+    if (!verified) {
+        error_message = QStringLiteral("Peer-list signature verification failed");
+    }
+
+    return verified;
 }
 
 }
@@ -146,7 +262,11 @@ const
         configuration.peer_id = result.peer_id;
         configuration.name = name;
 
-        auto peer_list = create_or_update_peer_list(configuration, nullptr, result.error_message);
+        auto peer_list = create_or_update_peer_list(
+            configuration,
+            nullptr,
+            {},
+            result.error_message);
         if (!result.error_message.isEmpty()) {
             return result;
         }
@@ -271,6 +391,36 @@ security_materials::operation_result security_materials::finalize_enrollment(
             return result;
         }
 
+        QString installed_fingerprint_error{};
+        const auto installed_fingerprint =
+            certificate_fingerprint(app_paths_.peer_certificate_path(), installed_fingerprint_error);
+        if (installed_fingerprint.isEmpty()) {
+            result.error_message = installed_fingerprint_error.isEmpty()
+                ? QStringLiteral("Failed to derive installed peer certificate fingerprint")
+                : installed_fingerprint_error;
+            qCCritical(shared_security_materials_log)
+                << "Failed to inspect installed peer certificate"
+                << result.error_message;
+            return result;
+        }
+
+        qCInfo(shared_security_materials_log)
+            << "Installed enrolled peer certificate"
+            << "fingerprint=" << installed_fingerprint
+            << "certificate_path=" << app_paths_.peer_certificate_path();
+
+        if (decision.hasTrustedAgentCaCertificate()) {
+            QSaveFile ca_file{app_paths_.pinned_trusted_agent_ca_certificate_path()};
+            ensure_save_file_open(ca_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open pinned trusted-agent CA file"));
+            ensure_write(ca_file, decision.trustedAgentCaCertificate(), QStringLiteral("Failed to write pinned trusted-agent CA file"));
+            ensure_commit(ca_file, QStringLiteral("Failed to commit pinned trusted-agent CA file"));
+        }
+
+        if (!validate_peer_list(decision.peerList(), result.error_message)) {
+            qCCritical(shared_security_materials_log) << "Failed to validate peer list from enrollment decision" << result.error_message;
+            return result;
+        }
+
         {
             QProtobufSerializer serializer{};
             const auto peer_list_bytes = decision.peerList().serialize(&serializer);
@@ -278,13 +428,6 @@ security_materials::operation_result security_materials::finalize_enrollment(
             ensure_save_file_open(peer_list_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open peer-list file"));
             ensure_write(peer_list_file, peer_list_bytes, QStringLiteral("Failed to write peer-list file"));
             ensure_commit(peer_list_file, QStringLiteral("Failed to commit peer-list file"));
-        }
-
-        if (decision.hasTrustedAgentCaCertificate()) {
-            QSaveFile ca_file{app_paths_.pinned_trusted_agent_ca_certificate_path()};
-            ensure_save_file_open(ca_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open pinned trusted-agent CA file"));
-            ensure_write(ca_file, decision.trustedAgentCaCertificate(), QStringLiteral("Failed to write pinned trusted-agent CA file"));
-            ensure_commit(ca_file, QStringLiteral("Failed to commit pinned trusted-agent CA file"));
         }
 
         result.success = true;
@@ -354,7 +497,26 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
         return decision;
     }
 
-    auto peer_list = create_or_update_peer_list(configuration, &request, error_message);
+    QString issued_fingerprint_error{};
+    const auto issued_fingerprint = certificate_fingerprint(certificate_pem_path, issued_fingerprint_error);
+    if (issued_fingerprint.isEmpty()) {
+        error_message = issued_fingerprint_error.isEmpty()
+            ? QStringLiteral("Failed to derive issued enrollment certificate fingerprint")
+            : issued_fingerprint_error;
+        return decision;
+    }
+
+    qCInfo(shared_security_materials_log)
+        << "Issued enrollment certificate"
+        << "peer_id=" << request.peer_id
+        << "fingerprint=" << issued_fingerprint
+        << "certificate_path=" << certificate_pem_path;
+
+    auto peer_list = create_or_update_peer_list(
+        configuration,
+        &request,
+        certificate_pem_path,
+        error_message);
     if (!error_message.isEmpty()) {
         return decision;
     }
@@ -384,6 +546,155 @@ QByteArray security_materials::current_ca_certificate_der() const
 {
     QString error_message{};
     return certificate_der(app_paths_.ca_certificate_path(), error_message);
+}
+
+shared::v1::PeerList security_materials::current_peer_list(QString &error_message) const
+{
+    return load_peer_list(error_message);
+}
+
+security_materials::peer_list_update_result security_materials::store_peer_list_if_newer(
+    const shared::v1::PeerList &peer_list) const
+{
+    peer_list_update_result result{};
+    if (!validate_peer_list(peer_list, result.error_message)) {
+        return result;
+    }
+
+    QString current_error{};
+    const auto current_peer_list = load_peer_list(current_error);
+    if (!current_error.isEmpty() && QFile::exists(app_paths_.peer_list_path())) {
+        result.error_message = current_error;
+        return result;
+    }
+
+    if (current_peer_list.version() > peer_list.version()) {
+        result.success = true;
+        return result;
+    }
+
+    if (current_peer_list.version() == peer_list.version() && current_peer_list.version() != 0) {
+        if (serialize_peer_list(current_peer_list) != serialize_peer_list(peer_list)) {
+            result.error_message = QStringLiteral("Received conflicting peer list for existing version");
+            return result;
+        }
+
+        result.success = true;
+        return result;
+    }
+
+    QString write_error{};
+    if (!write_peer_list(peer_list, write_error)) {
+        result.error_message = write_error;
+        return result;
+    }
+
+    result.success = true;
+    result.updated = true;
+    return result;
+}
+
+bool security_materials::validate_peer_list(
+    const shared::v1::PeerList &peer_list,
+    QString &error_message) const
+{
+    if (peer_list.version() == 0) {
+        error_message = QStringLiteral("Peer list must have a non-zero version");
+        return false;
+    }
+
+    if (!peer_list.hasTrustedAgentPeerId() || peer_list.trustedAgentPeerId().uuid().isEmpty()) {
+        error_message = QStringLiteral("Peer list is missing trusted-agent peer id");
+        return false;
+    }
+
+    if (peer_list.signature().isEmpty()) {
+        error_message = QStringLiteral("Peer list is missing signature");
+        return false;
+    }
+
+    if (!validate_peer_entries(peer_list.peers(), error_message)) {
+        return false;
+    }
+
+    QByteArray authority_certificate_der{};
+    try {
+        if (QFile::exists(app_paths_.ca_certificate_path())) {
+            authority_certificate_der = certificate_der(app_paths_.ca_certificate_path(), error_message);
+        } else {
+            authority_certificate_der = read_file_bytes(
+                app_paths_.pinned_trusted_agent_ca_certificate_path(),
+                QStringLiteral("Failed to open pinned trusted-agent CA certificate"));
+        }
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
+        return false;
+    }
+
+    if (authority_certificate_der.isEmpty()) {
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Trusted-agent CA certificate is unavailable");
+        }
+        return false;
+    }
+
+    return verify_peer_list_signature(
+        authority_certificate_der,
+        peer_list_payload_bytes(peer_list),
+        peer_list.signature(),
+        error_message);
+}
+
+bool security_materials::is_known_peer_identity(
+    const QString &peer_id,
+    const QString &peer_name,
+    const QString &certificate_fingerprint_sha256,
+    QString &error_message) const
+{
+    const auto peer_list = load_peer_list(error_message);
+    if (!error_message.isEmpty()) {
+        return false;
+    }
+
+    for (const auto &entry : peer_list.peers()) {
+        if (entry.identity().peerId().uuid() != peer_id) {
+            continue;
+        }
+
+        if (normalized_peer_name(entry.identity().name()) != normalized_peer_name(peer_name)) {
+            qCWarning(shared_security_materials_log)
+                << "Peer name mismatch"
+                << "peer_id=" << peer_id
+                << "expected=" << entry.identity().name()
+                << "actual=" << peer_name;
+            error_message = QStringLiteral("Peer name does not match the signed peer list");
+            return false;
+        }
+
+        if (entry.certificateFingerprintSha256() == certificate_fingerprint_sha256) {
+            return true;
+        }
+
+        qCWarning(shared_security_materials_log)
+            << "Peer certificate fingerprint mismatch"
+            << "peer_id=" << peer_id
+            << "expected=" << entry.certificateFingerprintSha256()
+            << "actual=" << certificate_fingerprint_sha256;
+        error_message = QStringLiteral("Peer certificate fingerprint does not match the signed peer list");
+        return false;
+    }
+
+    error_message = QStringLiteral("Peer is not present in the signed peer list");
+    return false;
+}
+
+QString security_materials::certificate_fingerprint_sha256(const QSslCertificate &certificate)
+{
+    if (certificate.isNull()) {
+        return {};
+    }
+
+    return QString::fromLatin1(QCryptographicHash::hash(certificate.toDer(), QCryptographicHash::Sha256).toHex());
 }
 
 QString security_materials::normalize_enrollment_fingerprint(const QString &value)
@@ -579,6 +890,7 @@ shared::v1::PeerList security_materials::load_peer_list(QString &error_message) 
 shared::v1::PeerList security_materials::create_or_update_peer_list(
     const agent_configuration &configuration,
     const pending_enrollment_request *request,
+    const QString &request_certificate_path,
     QString &error_message) const
 {
     auto current_peer_list = load_peer_list(error_message);
@@ -612,47 +924,8 @@ shared::v1::PeerList security_materials::create_or_update_peer_list(
     }
 
     if (request != nullptr) {
-        QTemporaryDir temporary_dir{};
-        const auto certificate_der_path = temporary_dir.filePath(QStringLiteral("peer-cert.der"));
-        const auto certificate_pem_path = temporary_dir.filePath(QStringLiteral("peer-cert.pem"));
-
-        const auto der_result = openssl_runner_ptr_->run({
-            QStringLiteral("x509"),
-            QStringLiteral("-req"),
-            QStringLiteral("-inform"), QStringLiteral("DER"),
-            QStringLiteral("-in"), temporary_dir.filePath(QStringLiteral("request.csr.der")),
-        });
-        Q_UNUSED(der_result)
-        QFile request_csr{temporary_dir.filePath(QStringLiteral("request.csr.der"))};
-        ensure_file_open(request_csr, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open temporary request CSR"));
-        ensure_write(request_csr, request->certificate_request, QStringLiteral("Failed to write temporary request CSR"));
-        request_csr.close();
-
-        const auto sign_result = openssl_runner_ptr_->run({
-            QStringLiteral("x509"),
-            QStringLiteral("-req"),
-            QStringLiteral("-inform"), QStringLiteral("DER"),
-            QStringLiteral("-in"), temporary_dir.filePath(QStringLiteral("request.csr.der")),
-            QStringLiteral("-CA"), app_paths_.ca_certificate_path(),
-            QStringLiteral("-CAkey"), app_paths_.ca_key_path(),
-            QStringLiteral("-CAserial"), app_paths_.ca_serial_path(),
-            QStringLiteral("-out"), certificate_pem_path,
-            QStringLiteral("-days"), QStringLiteral("36500"),
-            QStringLiteral("-sha256"),
-        });
-        if (!sign_result.success) {
-            error_message = sign_result.error_message;
-            return {};
-        }
-
-        const auto convert_result = openssl_runner_ptr_->run({
-            QStringLiteral("x509"),
-            QStringLiteral("-in"), certificate_pem_path,
-            QStringLiteral("-outform"), QStringLiteral("DER"),
-            QStringLiteral("-out"), certificate_der_path,
-        });
-        if (!convert_result.success) {
-            error_message = convert_result.error_message;
+        if (request_certificate_path.isEmpty()) {
+            error_message = QStringLiteral("Issued request certificate path is required");
             return {};
         }
 
@@ -660,18 +933,22 @@ shared::v1::PeerList security_materials::create_or_update_peer_list(
         auto updated = false;
         for (auto &entry : entries) {
             if (entry.identity().peerId().uuid() == request->peer_id) {
-                entry = peer_list_entry_for_request(*request, certificate_pem_path, error_message);
+                entry = peer_list_entry_for_request(*request, request_certificate_path, error_message);
                 updated = true;
                 break;
             }
         }
         if (!updated) {
-            entries.append(peer_list_entry_for_request(*request, certificate_pem_path, error_message));
+            entries.append(peer_list_entry_for_request(*request, request_certificate_path, error_message));
         }
         if (!error_message.isEmpty()) {
             return {};
         }
         peer_list.setPeers(entries);
+    }
+
+    if (!validate_peer_entries(peer_list.peers(), error_message)) {
+        return {};
     }
 
     shared::v1::PeerListToSign peer_list_to_sign{};

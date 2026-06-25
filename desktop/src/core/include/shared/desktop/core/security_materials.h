@@ -4,6 +4,8 @@
 #include "shared/desktop/core/app_paths.h"
 #include "shared.qpb.h"
 
+#include <QtNetwork/QSslCertificate>
+
 #include <QtCore/QString>
 
 namespace shared::desktop::core {
@@ -31,6 +33,10 @@ public:
         shared::v1::EnrollmentRequest request{};
     };
 
+    struct peer_list_update_result : operation_result {
+        bool updated{};
+    };
+
     explicit security_materials(const app_paths &app_paths);
 
     [[nodiscard]] trusted_agent_init_result initialize_local_trusted_agent(
@@ -54,6 +60,18 @@ public:
 
     [[nodiscard]] QString current_server_enrollment_fingerprint() const;
     [[nodiscard]] QByteArray current_ca_certificate_der() const;
+    [[nodiscard]] shared::v1::PeerList current_peer_list(QString &error_message) const;
+    [[nodiscard]] peer_list_update_result store_peer_list_if_newer(
+        const shared::v1::PeerList &peer_list) const;
+    [[nodiscard]] bool validate_peer_list(
+        const shared::v1::PeerList &peer_list,
+        QString &error_message) const;
+    [[nodiscard]] bool is_known_peer_identity(
+        const QString &peer_id,
+        const QString &peer_name,
+        const QString &certificate_fingerprint_sha256,
+        QString &error_message) const;
+    [[nodiscard]] static QString certificate_fingerprint_sha256(const QSslCertificate &certificate);
     [[nodiscard]] static QString normalize_enrollment_fingerprint(const QString &value);
     [[nodiscard]] static QString format_enrollment_fingerprint(const QString &value);
 
@@ -77,6 +95,7 @@ private:
     [[nodiscard]] shared::v1::PeerList create_or_update_peer_list(
         const agent_configuration &configuration,
         const pending_enrollment_request *request,
+        const QString &request_certificate_path,
         QString &error_message) const;
 
     [[nodiscard]] QByteArray sign_peer_list_payload(

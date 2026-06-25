@@ -1,6 +1,7 @@
 #pragma once
 
 #include "enrollment_server.h"
+#include "peer_service.h"
 
 #include "shared/desktop/core/app_paths.h"
 #include "shared/desktop/core/configuration_repository.h"
@@ -33,6 +34,7 @@ private:
     core::settings_repository settings_repository_{};
     core::agent_configuration configuration_{};
     std::unique_ptr<enrollment_server> enrollment_server_{};
+    std::unique_ptr<peer_service> peer_service_{};
     QTimer configuration_reload_timer_{};
 };
 

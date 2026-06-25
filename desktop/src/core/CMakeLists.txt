@@ -18,6 +18,7 @@ target_link_libraries(sharedproto PUBLIC
 shared_set_common_target_options(sharedproto)
 
 add_library(sharedcore STATIC
+    include/shared/desktop/core/address_hint_repository.h
     include/shared/desktop/core/agent_configuration.h
     include/shared/desktop/core/app_metadata.h
     include/shared/desktop/core/app_paths.h
@@ -31,6 +32,7 @@ add_library(sharedcore STATIC
     include/shared/desktop/core/pending_enrollment_repository.h
     include/shared/desktop/core/security_materials.h
     include/shared/desktop/core/settings_repository.h
+    src/address_hint_repository.cpp
     src/configuration_repository.cpp
     src/enrollment_client.cpp
     src/envelope_io.cpp

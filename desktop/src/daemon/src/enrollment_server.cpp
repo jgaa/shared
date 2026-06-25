@@ -38,6 +38,22 @@ shared::v1::EnrollmentDecision make_logged_error_decision(const QString &message
     return make_error_decision(message);
 }
 
+bool resolve_listen_address(const QString &host, QHostAddress &address)
+{
+    const auto trimmed_host = host.trimmed();
+    if (trimmed_host.isEmpty() || trimmed_host == QStringLiteral("0.0.0.0")) {
+        address = QHostAddress{QHostAddress::AnyIPv4};
+        return true;
+    }
+
+    if (trimmed_host == QStringLiteral("::")) {
+        address = QHostAddress{QHostAddress::AnyIPv6};
+        return true;
+    }
+
+    return address.setAddress(trimmed_host);
+}
+
 void write_decision_and_disconnect(QSslSocket *socket, const shared::v1::EnrollmentDecision &decision)
 {
     const auto payload = core::envelope_io::serialize(make_decision_envelope(decision));
@@ -87,7 +103,14 @@ bool enrollment_server::start(QString &error_message)
 
     connect(&server_, &QSslServer::pendingConnectionAvailable, this, &enrollment_server::handle_pending_connection);
 
-    if (!server_.listen(QHostAddress::Any, configuration_.enrollment_port)) {
+    QHostAddress listen_address{};
+    if (!resolve_listen_address(configuration_.enrollment_host, listen_address)) {
+        error_message = QStringLiteral("Invalid enrollment listen IP: %1").arg(configuration_.enrollment_host);
+        qCCritical(shared_enrollment_server_log) << error_message;
+        return false;
+    }
+
+    if (!server_.listen(listen_address, configuration_.enrollment_port)) {
         error_message = server_.errorString();
         qCCritical(shared_enrollment_server_log) << "Failed to listen for enrollment connections" << error_message;
         return false;

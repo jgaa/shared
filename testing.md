@@ -3,24 +3,29 @@
 Single-host manual test for one trusted agent and one joining client:
 
 ```sh
+rm /tmp/shared*.log
 # Terminal 1: trusted-agent daemon
 export XDG_CONFIG_HOME=/tmp/shared-a-config
 export XDG_DATA_HOME=/tmp/shared-a-data
 export XDG_CACHE_HOME=/tmp/shared-a-cache
 export XDG_RUNTIME_DIR=/tmp/shared-a-run
+export SHARED_PEERSERVICE_IP=127.0.0.1
+export SHARED_PEERSERVICE_PORT=47124
 rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" /tmp/shared-a-daemon.log /tmp/shared-a-gui.log
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 QT_QPA_PLATFORM=xcb /var/local/build/shared_desktop-Desktop-Debug/bin/shareddaemon \
   --log-to-console trace \
   --log-level trace \
-  --log-file /tmp/shared-a-daemon.log &s
+  --log-file /tmp/shared-a-daemon.log &
 
 # Terminal 2: trusted-agent GUI
 export XDG_CONFIG_HOME=/tmp/shared-a-config
 export XDG_DATA_HOME=/tmp/shared-a-data
 export XDG_CACHE_HOME=/tmp/shared-a-cache
 export XDG_RUNTIME_DIR=/tmp/shared-a-run
+export SHARED_PEERSERVICE_IP=127.0.0.1
+export SHARED_PEERSERVICE_PORT=47124
 QT_QPA_PLATFORM=xcb /var/local/build/shared_desktop-Desktop-Debug/bin/sharedgui \
   --log-to-console trace \
   --log-level trace \
@@ -31,6 +36,8 @@ export XDG_CONFIG_HOME=/tmp/shared-b-config
 export XDG_DATA_HOME=/tmp/shared-b-data
 export XDG_CACHE_HOME=/tmp/shared-b-cache
 export XDG_RUNTIME_DIR=/tmp/shared-b-run
+export SHARED_PEERSERVICE_IP=127.0.0.1
+export SHARED_PEERSERVICE_PORT=47125
 rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" /tmp/shared-b-daemon.log /tmp/shared-b-gui.log
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
@@ -44,10 +51,13 @@ export XDG_CONFIG_HOME=/tmp/shared-b-config
 export XDG_DATA_HOME=/tmp/shared-b-data
 export XDG_CACHE_HOME=/tmp/shared-b-cache
 export XDG_RUNTIME_DIR=/tmp/shared-b-run
+export SHARED_PEERSERVICE_IP=127.0.0.1
+export SHARED_PEERSERVICE_PORT=47125
 QT_QPA_PLATFORM=xcb /var/local/build/shared_desktop-Desktop-Debug/bin/sharedgui \
   --log-to-console trace \
   --log-level trace \
   --log-file /tmp/shared-b-gui.log &
+
 ```
 
 Trusted agent setup:
@@ -59,6 +69,7 @@ Trusted agent setup:
 5. Press `Initialize Trusted Agent`.
 6. Confirm the GUI leaves first-run setup and shows `Enrollment fingerprint`.
 7. Confirm Terminal 1 logs `trusted-agent enrollment server listening on port 47123`.
+8. Confirm Terminal 1 also logs the peer service listening on `127.0.0.1 47124`.
 
 Joining client:
 
@@ -79,7 +90,9 @@ Joining client:
 11. Verify the `Verification code` shown on the trusted-agent GUI matches the code shown on the joining client device.
 12. Press `Approve` on the trusted-agent GUI.
 13. Confirm the joining client GUI leaves first-run setup and shows `Joined trusted agent 127.0.0.1:47123` or the host and port you used.
-14. Confirm the log files capture the activity without unexpected TLS or OpenSSL errors:
+14. Open `File/Settings` in the joining client GUI and confirm `Trusted Agent -> Peer TCP Port` is `47124`.
+15. Confirm the joining-client daemon logs the peer service listening on `127.0.0.1 47125`.
+16. Confirm the log files capture the activity without unexpected TLS or OpenSSL errors:
     `/tmp/shared-a-daemon.log`
     `/tmp/shared-a-gui.log`
     `/tmp/shared-b-daemon.log`

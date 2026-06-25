@@ -5,10 +5,19 @@
 
 #include <exception>
 #include <QtConcurrent/QtConcurrentRun>
+#include <QtCore/QDateTime>
+#include <QtCore/QFile>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QCoreApplication>
+#include <QtNetwork/QHostAddress>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QSettings>
+#include <QtCore/QSysInfo>
 #include <QtCore/QVariantMap>
 #include <QtCore/QtNumeric>
+#include <algorithm>
 #include <stdexcept>
 
 namespace shared::desktop::gui {
@@ -24,6 +33,46 @@ void ensure_settings_ok(const QSettings &settings, const QString &message)
     }
 }
 
+QString normalized_agent_name(QString name)
+{
+    name = name.trimmed();
+    if (!name.isEmpty()) {
+        return name;
+    }
+
+    const auto hostname = QSysInfo::machineHostName().trimmed();
+    if (!hostname.isEmpty()) {
+        return hostname;
+    }
+
+    return QStringLiteral("shared");
+}
+
+QString normalized_listen_host(QString host)
+{
+    host = host.trimmed();
+    if (!host.isEmpty()) {
+        return host;
+    }
+
+    return QStringLiteral("0.0.0.0");
+}
+
+bool is_valid_listen_host(const QString &host)
+{
+    if (host == QStringLiteral("0.0.0.0") || host == QStringLiteral("::")) {
+        return true;
+    }
+
+    QHostAddress address{};
+    return address.setAddress(host);
+}
+
+int bounded_port(int value)
+{
+    return qBound(1, value, 65535);
+}
+
 }
 
 app_controller::app_controller(QObject *parent)
@@ -34,11 +83,15 @@ app_controller::app_controller(QObject *parent)
     connect(&log_refresh_timer_, &QTimer::timeout, this, &app_controller::refresh_log_lines);
     log_refresh_timer_.setInterval(500);
     log_refresh_timer_.start();
+    connect(&peer_refresh_timer_, &QTimer::timeout, this, &app_controller::refresh_verified_peers);
+    peer_refresh_timer_.setInterval(1000);
+    peer_refresh_timer_.start();
     connect(&pending_request_refresh_timer_, &QTimer::timeout, this, &app_controller::refresh_pending_requests);
     pending_request_refresh_timer_.setInterval(500);
     pending_request_refresh_timer_.start();
     connect(&join_watcher_, &QFutureWatcher<core::enrollment_client::result>::finished, this, &app_controller::finish_join_request);
     refresh_log_lines();
+    refresh_verified_peers();
     refresh_pending_requests();
     reload_state();
 }
@@ -48,9 +101,34 @@ QString app_controller::app_name() const
     return core::app_metadata::organization_name;
 }
 
+QString app_controller::application_version() const
+{
+    return QCoreApplication::applicationVersion();
+}
+
+QString app_controller::qt_version() const
+{
+    return QString::fromLatin1(qVersion());
+}
+
+QString app_controller::build_abi() const
+{
+    return QSysInfo::buildAbi();
+}
+
+QString app_controller::build_timestamp() const
+{
+    return QStringLiteral(__DATE__ " " __TIME__);
+}
+
 QString app_controller::socket_path() const
 {
     return app_paths_.socket_path();
+}
+
+QString app_controller::default_agent_name() const
+{
+    return normalized_agent_name({});
 }
 
 bool app_controller::configured() const
@@ -73,9 +151,49 @@ QString app_controller::configured_peer_id() const
     return configuration_.peer_id;
 }
 
+QString app_controller::local_enrollment_host() const
+{
+    return normalized_listen_host(configuration_.enrollment_host);
+}
+
+int app_controller::local_enrollment_port() const
+{
+    return configuration_.enrollment_port;
+}
+
+QString app_controller::local_peer_host() const
+{
+    return normalized_listen_host(configuration_.peer_host);
+}
+
+int app_controller::local_peer_port() const
+{
+    return configuration_.peer_port;
+}
+
+QString app_controller::trusted_agent_host() const
+{
+    return configuration_.trusted_agent.host;
+}
+
+int app_controller::trusted_agent_port() const
+{
+    return configuration_.trusted_agent.port == 0 ? 47123 : configuration_.trusted_agent.port;
+}
+
+int app_controller::trusted_agent_peer_port() const
+{
+    return configuration_.trusted_agent.peer_port == 0 ? 47124 : configuration_.trusted_agent.peer_port;
+}
+
 QString app_controller::trusted_agent_fingerprint() const
 {
     return trusted_agent_fingerprint_;
+}
+
+QVariantList app_controller::verified_peers() const
+{
+    return verified_peers_;
 }
 
 QString app_controller::last_error() const
@@ -198,6 +316,72 @@ void app_controller::set_clipboard_limit_megabytes(int value)
     emit clipboard_limit_megabytes_changed();
 }
 
+void app_controller::set_local_enrollment_host(const QString &value)
+{
+    const auto host = normalized_listen_host(value);
+    if (!is_valid_listen_host(host)) {
+        set_last_error(QStringLiteral("Local enrollment listen IP must be a valid IPv4 or IPv6 address"));
+        return;
+    }
+
+    save_configuration_field([&host](auto &configuration) {
+        configuration.enrollment_host = host;
+    });
+}
+
+void app_controller::set_local_enrollment_port(int value)
+{
+    const auto port = bounded_port(value);
+    save_configuration_field([port](auto &configuration) {
+        configuration.enrollment_port = static_cast<quint16>(port);
+    });
+}
+
+void app_controller::set_local_peer_host(const QString &value)
+{
+    const auto host = normalized_listen_host(value);
+    if (!is_valid_listen_host(host)) {
+        set_last_error(QStringLiteral("Local peer listen IP must be a valid IPv4 or IPv6 address"));
+        return;
+    }
+
+    save_configuration_field([&host](auto &configuration) {
+        configuration.peer_host = host;
+    });
+}
+
+void app_controller::set_local_peer_port(int value)
+{
+    const auto port = bounded_port(value);
+    save_configuration_field([port](auto &configuration) {
+        configuration.peer_port = static_cast<quint16>(port);
+    });
+}
+
+void app_controller::set_trusted_agent_host(const QString &value)
+{
+    const auto host = value.trimmed();
+    save_configuration_field([&host](auto &configuration) {
+        configuration.trusted_agent.host = host;
+    });
+}
+
+void app_controller::set_trusted_agent_port(int value)
+{
+    const auto port = bounded_port(value);
+    save_configuration_field([port](auto &configuration) {
+        configuration.trusted_agent.port = static_cast<quint16>(port);
+    });
+}
+
+void app_controller::set_trusted_agent_peer_port(int value)
+{
+    const auto port = bounded_port(value);
+    save_configuration_field([port](auto &configuration) {
+        configuration.trusted_agent.peer_port = static_cast<quint16>(port);
+    });
+}
+
 void app_controller::set_app_log_level(int value)
 {
     save_logging_value(QStringLiteral("logging/applevel"), value);
@@ -225,6 +409,7 @@ void app_controller::reload_state()
     try {
         configuration_ = configuration_repository_.load();
         trusted_agent_fingerprint_ = security_materials_.current_server_enrollment_fingerprint();
+        refresh_verified_peers();
     } catch (const std::exception &exception) {
         qCCritical(shared_gui_app_controller_log) << "Failed to reload GUI state" << exception.what();
         set_last_error(QString::fromUtf8(exception.what()));
@@ -235,10 +420,13 @@ void app_controller::reload_state()
 bool app_controller::initialize_local_trusted_agent(const QString &name, int enrollment_port)
 {
     set_last_error({});
-    qCInfo(shared_gui_app_controller_log) << "Initialize trusted agent requested" << name.trimmed() << enrollment_port;
+    const auto effective_name = normalized_agent_name(name);
+    qCInfo(shared_gui_app_controller_log) << "Initialize trusted agent requested" << effective_name << enrollment_port;
 
     try {
-        const auto result = security_materials_.initialize_local_trusted_agent(name.trimmed(), static_cast<quint16>(enrollment_port));
+        const auto result = security_materials_.initialize_local_trusted_agent(
+            effective_name,
+            static_cast<quint16>(enrollment_port));
         if (!result.success) {
             qCCritical(shared_gui_app_controller_log) << "Trusted-agent initialization failed" << result.error_message;
             set_last_error(result.error_message);
@@ -249,8 +437,11 @@ bool app_controller::initialize_local_trusted_agent(const QString &name, int enr
             .initialized = true,
             .role = core::agent_role::local_trusted_agent,
             .peer_id = result.peer_id,
-            .name = name.trimmed(),
+            .name = effective_name,
+            .enrollment_host = configuration_.enrollment_host,
             .enrollment_port = static_cast<quint16>(enrollment_port),
+            .peer_host = configuration_.peer_host,
+            .peer_port = configuration_.peer_port,
         };
         configuration_repository_.save(configuration_);
         trusted_agent_fingerprint_ = result.enrollment_fingerprint;
@@ -288,24 +479,20 @@ QString app_controller::prepare_join_trusted_agent(const QString &name)
     pending_join_enrollment_.reset();
     pending_join_name_.clear();
     pending_join_verification_code_.clear();
+    const auto effective_name = normalized_agent_name(name);
     qCInfo(shared_gui_app_controller_log)
         << "Prepare join trusted agent requested"
-        << "name=" << name.trimmed();
-
-    if (name.trimmed().isEmpty()) {
-        set_last_error(QStringLiteral("Device name is required"));
-        return {};
-    }
+        << "name=" << effective_name;
 
     try {
-        const auto prepared = security_materials_.prepare_enrollment_request(name.trimmed());
+        const auto prepared = security_materials_.prepare_enrollment_request(effective_name);
         if (!prepared.success) {
             qCCritical(shared_gui_app_controller_log) << "Prepare join trusted agent failed" << prepared.error_message;
             set_last_error(prepared.error_message);
             return {};
         }
 
-        pending_join_name_ = name.trimmed();
+        pending_join_name_ = effective_name;
         pending_join_enrollment_ = prepared;
         pending_join_verification_code_ = prepared.verification_code;
         qCInfo(shared_gui_app_controller_log)
@@ -421,6 +608,23 @@ void app_controller::set_last_error(const QString &message)
     emit state_changed();
 }
 
+bool app_controller::save_configuration_field(std::function<void(core::agent_configuration &)> update)
+{
+    try {
+        set_last_error({});
+        auto next_configuration = configuration_;
+        update(next_configuration);
+        configuration_repository_.save(next_configuration);
+        configuration_ = next_configuration;
+        emit state_changed();
+        return true;
+    } catch (const std::exception &exception) {
+        qCCritical(shared_gui_app_controller_log) << "Failed to save configuration field" << exception.what();
+        set_last_error(QString::fromUtf8(exception.what()));
+        return false;
+    }
+}
+
 void app_controller::save_logging_value(const QString &key, const QVariant &value)
 {
     QSettings settings{};
@@ -441,6 +645,94 @@ void app_controller::refresh_log_lines()
 
     log_lines_ = next_lines;
     emit log_lines_changed();
+}
+
+void app_controller::refresh_verified_peers()
+{
+    QVariantList next_peers{};
+
+    QString peer_list_error{};
+    const auto peer_list = security_materials_.current_peer_list(peer_list_error);
+    if (!peer_list_error.isEmpty()) {
+        qCCritical(shared_gui_app_controller_log) << "Failed to load peer list for GUI peer view" << peer_list_error;
+        return;
+    }
+
+    QHash<QString, QJsonObject> runtime_status{};
+    QFile status_file{app_paths_.peer_status_path()};
+    if (status_file.exists() && status_file.open(QIODevice::ReadOnly)) {
+        const auto document = QJsonDocument::fromJson(status_file.readAll());
+        if (document.isArray()) {
+            for (const auto &value : document.array()) {
+                if (!value.isObject()) {
+                    continue;
+                }
+                const auto object = value.toObject();
+                runtime_status.insert(object.value(QStringLiteral("peer_id")).toString(), object);
+            }
+        }
+    }
+
+    QList<shared::v1::PeerListEntry> entries{};
+    for (const auto &entry : peer_list.peers()) {
+        if (entry.identity().peerId().uuid() == configuration_.peer_id) {
+            continue;
+        }
+        entries.append(entry);
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const auto &left, const auto &right) {
+        return QString::localeAwareCompare(left.identity().name(), right.identity().name()) < 0;
+    });
+
+    for (const auto &entry : entries) {
+        const auto peer_id = entry.identity().peerId().uuid();
+        const auto status = runtime_status.value(peer_id);
+        const auto connected = status.value(QStringLiteral("connected")).toBool();
+        const auto relay_available = status.value(QStringLiteral("relay_available")).toBool();
+        const auto address_available = status.value(QStringLiteral("address_available")).toBool();
+
+        QString status_label{};
+        QString status_color{};
+        if (connected) {
+            status_label = QStringLiteral("Connected");
+            status_color = QStringLiteral("#2e9d50");
+        } else if (relay_available) {
+            status_label = QStringLiteral("Probably Available");
+            status_color = QStringLiteral("#d6b11f");
+        } else if (address_available) {
+            status_label = QStringLiteral("Available");
+            status_color = QStringLiteral("#cf6d1d");
+        } else {
+            status_label = QStringLiteral("Unavailable");
+            status_color = QStringLiteral("#b23a2e");
+        }
+
+        QVariantMap row{};
+        row.insert(QStringLiteral("peer_id"), peer_id);
+        row.insert(QStringLiteral("name"), entry.identity().name());
+        row.insert(QStringLiteral("status_label"), status_label);
+        row.insert(QStringLiteral("status_color"), status_color);
+
+        const auto address = status.value(QStringLiteral("address")).toString();
+        const auto port = status.value(QStringLiteral("port")).toInt();
+        row.insert(
+            QStringLiteral("address"),
+            address.isEmpty() || port <= 0
+                ? QString{}
+                : QStringLiteral("%1:%2").arg(address).arg(port));
+        row.insert(
+            QStringLiteral("last_communicated"),
+            format_elapsed(status.value(QStringLiteral("last_communication_time_ms")).toString().toLongLong()));
+        next_peers.append(row);
+    }
+
+    if (next_peers == verified_peers_) {
+        return;
+    }
+
+    verified_peers_ = next_peers;
+    emit peers_changed();
 }
 
 void app_controller::refresh_pending_requests()
@@ -493,6 +785,36 @@ void app_controller::finish_join_request()
         set_last_error(QString::fromUtf8(exception.what()));
         emit state_changed();
     }
+}
+
+QString app_controller::format_elapsed(qint64 last_communication_time_ms) const
+{
+    if (last_communication_time_ms <= 0) {
+        return QStringLiteral("Never");
+    }
+
+    const auto elapsed_ms = std::max<qint64>(
+        0,
+        QDateTime::currentDateTimeUtc().toMSecsSinceEpoch() - last_communication_time_ms);
+
+    double value = static_cast<double>(elapsed_ms);
+    QString unit{QStringLiteral("ms")};
+
+    if (elapsed_ms >= 24LL * 60 * 60 * 1000) {
+        value /= 24.0 * 60.0 * 60.0 * 1000.0;
+        unit = QStringLiteral("d");
+    } else if (elapsed_ms >= 60LL * 60 * 1000) {
+        value /= 60.0 * 60.0 * 1000.0;
+        unit = QStringLiteral("h");
+    } else if (elapsed_ms >= 60LL * 1000) {
+        value /= 60.0 * 1000.0;
+        unit = QStringLiteral("m");
+    } else if (elapsed_ms >= 1000) {
+        value /= 1000.0;
+        unit = QStringLiteral("s");
+    }
+
+    return QStringLiteral("%1 %2").arg(QString::number(value, 'f', 2), unit);
 }
 
 }

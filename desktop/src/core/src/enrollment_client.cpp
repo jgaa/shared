@@ -210,12 +210,22 @@ enrollment_client::result enrollment_client::enroll_prepared(
             << "signed_cert_bytes=" << response.enrollmentDecision().signedCertificate().size();
 
         agent_configuration configuration{};
+        try {
+            configuration = configuration_repository_.load();
+        } catch (const std::exception &exception) {
+            return fail_enrollment(
+                QStringLiteral("Failed to load local configuration"),
+                QString::fromUtf8(exception.what()));
+        }
         configuration.initialized = true;
         configuration.role = agent_role::peer;
         configuration.peer_id = prepared.peer_id;
         configuration.name = name;
         configuration.trusted_agent.host = host;
         configuration.trusted_agent.port = port;
+        configuration.trusted_agent.peer_port = configuration.trusted_agent.peer_port == 0
+            ? static_cast<quint16>(47124)
+            : configuration.trusted_agent.peer_port;
         configuration.trusted_agent.pinned_server_fingerprint = normalized_expected_fingerprint;
 
         const auto finalize_result = security_materials_.finalize_enrollment(configuration, response.enrollmentDecision());

@@ -1,3 +1,4 @@
+#include "shared/desktop/core/address_hint_repository.h"
 #include "shared/desktop/core/app_paths.h"
 #include "shared/desktop/core/configuration_repository.h"
 #include "shared/desktop/core/envelope_io.h"
@@ -83,6 +84,7 @@ private slots:
     void envelope_io_round_trip();
     void configuration_repository_round_trip();
     void pending_enrollment_repository_round_trip();
+    void address_hint_repository_round_trip();
     void enrollment_fingerprint_normalization();
     void logging_controller_levels();
     void security_materials_bootstrap_flow();
@@ -137,9 +139,13 @@ void sharedcore_tests::configuration_repository_round_trip()
     configuration.role = shared::desktop::core::agent_role::peer;
     configuration.peer_id = QStringLiteral("peer-id");
     configuration.name = QStringLiteral("peer-name");
+    configuration.enrollment_host = QStringLiteral("127.0.0.2");
     configuration.enrollment_port = 49999;
+    configuration.peer_host = QStringLiteral("127.0.0.3");
+    configuration.peer_port = 49998;
     configuration.trusted_agent.host = QStringLiteral("127.0.0.1");
     configuration.trusted_agent.port = 47123;
+    configuration.trusted_agent.peer_port = 47124;
     configuration.trusted_agent.pinned_server_fingerprint = QStringLiteral("abcd");
 
     repository.save(configuration);
@@ -149,9 +155,13 @@ void sharedcore_tests::configuration_repository_round_trip()
     QCOMPARE(loaded_after.role, shared::desktop::core::agent_role::peer);
     QCOMPARE(loaded_after.peer_id, QStringLiteral("peer-id"));
     QCOMPARE(loaded_after.name, QStringLiteral("peer-name"));
+    QCOMPARE(loaded_after.enrollment_host, QStringLiteral("127.0.0.2"));
     QCOMPARE(loaded_after.enrollment_port, static_cast<quint16>(49999));
+    QCOMPARE(loaded_after.peer_host, QStringLiteral("127.0.0.3"));
+    QCOMPARE(loaded_after.peer_port, static_cast<quint16>(49998));
     QCOMPARE(loaded_after.trusted_agent.host, QStringLiteral("127.0.0.1"));
     QCOMPARE(loaded_after.trusted_agent.port, static_cast<quint16>(47123));
+    QCOMPARE(loaded_after.trusted_agent.peer_port, static_cast<quint16>(47124));
     QCOMPARE(loaded_after.trusted_agent.pinned_server_fingerprint, QStringLiteral("abcd"));
 }
 
@@ -191,6 +201,42 @@ void sharedcore_tests::pending_enrollment_repository_round_trip()
     repository.remove_request(QStringLiteral("request-1"));
     QVERIFY(!repository.load_request(QStringLiteral("request-1")).has_value());
     QVERIFY(!repository.load_decision(QStringLiteral("request-1")).has_value());
+}
+
+void sharedcore_tests::address_hint_repository_round_trip()
+{
+    QTemporaryDir temporary_dir{};
+    QVERIFY(temporary_dir.isValid());
+    environment_guard guard{temporary_dir};
+
+    shared::desktop::core::app_paths app_paths{};
+    QVERIFY(app_paths.ensure_directories());
+
+    shared::desktop::core::address_hint_repository repository{app_paths};
+    shared::v1::PeerAddress first{};
+    first.setIp(QStringLiteral("10.0.0.10"));
+    first.setPort(47124);
+    first.setSource(QStringLiteral("gossip"));
+    first.setObservedTimeMs(1000);
+
+    bool changed{};
+    repository.merge_address(QStringLiteral("peer-1"), first, changed);
+    QVERIFY(changed);
+
+    changed = false;
+    repository.merge_address(QStringLiteral("peer-1"), first, changed);
+    QVERIFY(!changed);
+
+    shared::v1::PeerAddress updated = first;
+    updated.setObservedTimeMs(2000);
+    repository.merge_address(QStringLiteral("peer-1"), updated, changed);
+    QVERIFY(changed);
+
+    const auto loaded = repository.load_for_peer(QStringLiteral("peer-1"));
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.first().ip(), QStringLiteral("10.0.0.10"));
+    QCOMPARE(loaded.first().port(), static_cast<quint32>(47124));
+    QCOMPARE(loaded.first().observedTimeMs(), static_cast<quint64>(2000));
 }
 
 void sharedcore_tests::enrollment_fingerprint_normalization()
@@ -265,6 +311,7 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     configuration.peer_id = trusted_agent_result.peer_id;
     configuration.name = QStringLiteral("trusted-box");
     configuration.enrollment_port = 47123;
+    configuration.peer_port = 47124;
 
     shared::desktop::core::pending_enrollment_request request{};
     request.request_id = QStringLiteral("request-1");
@@ -281,6 +328,37 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     QVERIFY(decision.approved());
     QVERIFY(!decision.signedCertificate().isEmpty());
     QVERIFY(decision.hasPeerList());
+    QVERIFY(decision.hasTrustedAgentCaCertificate());
+
+    QString peer_list_error{};
+    QVERIFY(security_materials.validate_peer_list(decision.peerList(), peer_list_error));
+    QVERIFY2(peer_list_error.isEmpty(), qPrintable(peer_list_error));
+
+    const auto current_peer_list = security_materials.current_peer_list(peer_list_error);
+    QVERIFY2(peer_list_error.isEmpty(), qPrintable(peer_list_error));
+    QCOMPARE(current_peer_list.version(), static_cast<quint32>(2));
+    QCOMPARE(current_peer_list.peers().size(), 2);
+
+    const auto update_result = security_materials.store_peer_list_if_newer(decision.peerList());
+    QVERIFY2(update_result.success, qPrintable(update_result.error_message));
+    QVERIFY(!update_result.updated);
+
+    QString known_peer_error{};
+    QVERIFY(security_materials.is_known_peer_identity(
+        enrollment.peer_id,
+        QStringLiteral("joining-box"),
+        decision.peerList().peers().last().certificateFingerprintSha256(),
+        known_peer_error));
+    QVERIFY2(known_peer_error.isEmpty(), qPrintable(known_peer_error));
+
+    auto duplicate_name_request = request;
+    duplicate_name_request.request_id = QStringLiteral("request-2");
+    duplicate_name_request.peer_id = QStringLiteral("duplicate-peer-id");
+    QString duplicate_name_error{};
+    const auto duplicate_name_decision =
+        security_materials.build_approved_decision(configuration, duplicate_name_request, duplicate_name_error);
+    QVERIFY(!duplicate_name_decision.approved());
+    QCOMPARE(duplicate_name_error, QStringLiteral("Peer list contains duplicate peer names"));
 }
 
 }

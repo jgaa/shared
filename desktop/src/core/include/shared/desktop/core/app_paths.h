@@ -15,6 +15,8 @@ public:
     [[nodiscard]] QString trusted_agent_dir() const;
     [[nodiscard]] QString pending_enrollments_dir() const;
     [[nodiscard]] QString peer_list_path() const;
+    [[nodiscard]] QString address_hints_path() const;
+    [[nodiscard]] QString peer_status_path() const;
     [[nodiscard]] QString ca_key_path() const;
     [[nodiscard]] QString ca_certificate_path() const;
     [[nodiscard]] QString ca_serial_path() const;

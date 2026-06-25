@@ -140,6 +140,9 @@ Desktop peers are responsible for:
 * approving peers
 * signing certificates
 * signing peer lists
+* notifying connected authenticated peers when the signed peer list changes
+
+Desktop peers and non-agent peers both expose a dedicated peer mTLS listener separate from the trusted-agent enrollment listener.
 
 The trusted agent may be offline after enrollment.
 

@@ -3,6 +3,8 @@ qt_add_executable(shareddaemon
     src/daemon_application.cpp
     src/enrollment_server.h
     src/enrollment_server.cpp
+    src/peer_service.h
+    src/peer_service.cpp
     src/main.cpp
 )
 

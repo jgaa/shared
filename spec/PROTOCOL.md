@@ -31,6 +31,15 @@ Connections are long lived.
 
 Peers attempt outgoing connections to all known peers.
 
+Two distinct TCP listeners exist in v1:
+
+* enrollment TCP/TLS port on the trusted agent
+* peer TCP/mTLS port on every authenticated peer
+
+The enrollment port is used only for bootstrap and certificate issuance.
+
+The peer port is used for authenticated peer sessions, peer-list propagation, address gossip, routing, and transfers.
+
 ## Identity and Trust
 
 Identity is established by:
@@ -83,6 +92,10 @@ Acceptance rules:
 * higher versions replace the current list
 * equal version with different signed content is a protocol error
 
+When the trusted agent signs a newer peer list, it must send that new list to all currently connected authenticated peers.
+
+Peers that accept a newer valid signed peer list should forward it to their other authenticated peers.
+
 If the trusted agent is offline, peers continue operating from the latest valid cached list.
 
 ## Enrollment
@@ -128,6 +141,10 @@ Sources:
 Addresses are not trusted.
 
 Observed addresses may be used as connection hints even when the trusted agent is offline.
+
+Authenticated peers gossip address hints to help peers discover each other.
+
+Trusted peers may derive direct address hints from active authenticated connections and redistribute those hints to other authenticated peers.
 
 ## Duplicate Connections
 

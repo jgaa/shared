@@ -75,6 +75,16 @@ QString app_paths::peer_list_path() const
     return clean_path(data_dir() + QStringLiteral("/peer-list.bin"));
 }
 
+QString app_paths::address_hints_path() const
+{
+    return clean_path(data_dir() + QStringLiteral("/address-hints.json"));
+}
+
+QString app_paths::peer_status_path() const
+{
+    return clean_path(data_dir() + QStringLiteral("/peer-status.json"));
+}
+
 QString app_paths::ca_key_path() const
 {
     return clean_path(trusted_agent_dir() + QStringLiteral("/ca-key.pem"));

@@ -9,27 +9,41 @@ ApplicationWindow {
     height: 600
     visible: true
     title: app_controller.app_name
+    menuBar: MenuBar {
+        Menu {
+            title: "File"
 
-    header: ToolBar {
-        contentHeight: title_label.implicitHeight + 24
+            Action {
+                text: "Peers"
+                onTriggered: peers_dialog.open()
+            }
 
-        Label {
-            id: title_label
+            Action {
+                text: "Log"
+                onTriggered: log_viewer_dialog.open()
+            }
 
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
-            anchors.leftMargin: 20
-            text: "shared"
-            font.pixelSize: 28
-            font.bold: true
+            Action {
+                text: "Settings"
+                onTriggered: settings_dialog.open()
+            }
+
+            MenuSeparator {
+            }
+
+            Action {
+                text: "Quit"
+                onTriggered: Qt.quit()
+            }
         }
 
-        Button {
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.right: parent.right
-            anchors.rightMargin: 20
-            text: "Settings"
-            onClicked: settings_dialog.open()
+        Menu {
+            title: "Help"
+
+            Action {
+                text: "About"
+                onTriggered: about_dialog.open()
+            }
         }
     }
 
@@ -112,6 +126,7 @@ ApplicationWindow {
                             TextField {
                                 id: peer_name
 
+                                text: app_controller.default_agent_name
                                 placeholderText: "Device name"
                                 Layout.fillWidth: true
                             }
@@ -123,43 +138,51 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                             }
 
-                            Label {
-                                text: "TCP Port"
-                            }
-
-                            SpinBox {
-                                id: peer_port
-
-                                from: 1
-                                to: 65535
-                                value: 47123
-                                editable: true
-                            }
-
-                            TextField {
-                                id: peer_fingerprint
-
-                                placeholderText: "Enrollment fingerprint (abcd-1234)"
+                            RowLayout {
                                 Layout.fillWidth: true
+
+                                Label {
+                                    text: "TCP Port"
+                                }
+
+                                SpinBox {
+                                    id: peer_port
+
+                                    from: 1
+                                    to: 65535
+                                    value: app_controller.trusted_agent_port
+                                    editable: true
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+
+                                TextField {
+                                    id: peer_fingerprint
+
+                                    placeholderText: "Enrollment fingerprint (abcd-1234)"
+                                    Layout.fillWidth: true
+                                }
+
+                                Button {
+                                    text: "Start Enrollment"
+                                    onClicked: {
+                                        const code = app_controller.prepare_join_trusted_agent(peer_name.text)
+                                        if (!code || code.length === 0) {
+                                            return
+                                        }
+
+                                        app_controller.complete_join_trusted_agent(
+                                            peer_host.text,
+                                            peer_port.value,
+                                            peer_fingerprint.text)
+                                    }
+                                }
                             }
 
                             Item {
                                 Layout.fillHeight: true
-                            }
-
-                            Button {
-                                text: "Start Enrollment"
-                                onClicked: {
-                                    const code = app_controller.prepare_join_trusted_agent(peer_name.text)
-                                    if (!code || code.length === 0) {
-                                        return
-                                    }
-
-                                    app_controller.complete_join_trusted_agent(
-                                        peer_host.text,
-                                        peer_port.value,
-                                        peer_fingerprint.text)
-                                }
                             }
                         }
                     }
@@ -178,21 +201,26 @@ ApplicationWindow {
                             TextField {
                                 id: trusted_name
 
+                                text: app_controller.default_agent_name
                                 placeholderText: "Device name"
                                 Layout.fillWidth: true
                             }
 
-                            Label {
-                                text: "TCP Port"
-                            }
+                            RowLayout {
+                                Layout.fillWidth: true
 
-                            SpinBox {
-                                id: trusted_port
+                                Label {
+                                    text: "TCP Port"
+                                }
 
-                                from: 1
-                                to: 65535
-                                value: 47123
-                                editable: true
+                                SpinBox {
+                                    id: trusted_port
+
+                                    from: 1
+                                    to: 65535
+                                    value: app_controller.local_enrollment_port
+                                    editable: true
+                                }
                             }
 
                             Item {
@@ -322,155 +350,24 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    SettingsDialog {
         id: settings_dialog
+        parent: window.contentItem
+    }
 
-        x: (window.width - width) / 2
-        y: (window.height - height) / 2
-        width: Math.min(window.width - 80, 760)
-        height: Math.min(window.height - 80, 560)
-        modal: true
-        title: "Settings"
+    LogViewerDialog {
+        id: log_viewer_dialog
+        parent: window.contentItem
+    }
 
-        onOpened: log_settings.reload()
+    PeersDialog {
+        id: peers_dialog
+        parent: window.contentItem
+    }
 
-        ColumnLayout {
-            anchors.fill: parent
-            spacing: 16
-
-            TabBar {
-                id: settings_tabs
-
-                Layout.fillWidth: true
-
-                TabButton {
-                    text: "General"
-                }
-
-                TabButton {
-                    text: "Logs"
-                }
-            }
-
-            StackLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                currentIndex: settings_tabs.currentIndex
-
-                ScrollView {
-                    clip: true
-
-                    ColumnLayout {
-                        width: parent.width
-                        spacing: 20
-
-                        Frame {
-                            Layout.fillWidth: true
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                spacing: 10
-
-                                Label {
-                                    text: "Clipboard"
-                                    font.pixelSize: 18
-                                    font.bold: true
-                                }
-
-                                Label {
-                                    text: "Clipboard Limit (MiB)"
-                                }
-
-                                SpinBox {
-                                    value: app_controller.clipboard_limit_megabytes
-                                    from: 1
-                                    to: 8
-                                    editable: true
-                                    onValueModified: app_controller.clipboard_limit_megabytes = value
-                                }
-                            }
-                        }
-
-                        Frame {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                spacing: 10
-
-                                Label {
-                                    text: "Logging"
-                                    font.pixelSize: 18
-                                    font.bold: true
-                                }
-
-                                LogSettings {
-                                    id: log_settings
-
-                                    Layout.fillWidth: true
-                                    Layout.fillHeight: true
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Frame {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 10
-
-                        Label {
-                            text: "Live Logs"
-                            font.pixelSize: 18
-                            font.bold: true
-                        }
-
-                        Label {
-                            text: "The live log view is captured in memory for the current GUI process."
-                            wrapMode: Text.WordWrap
-                            color: palette.mid
-                            Layout.fillWidth: true
-                        }
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            color: "#142028"
-                            radius: 8
-
-                            ListView {
-                                anchors.fill: parent
-                                anchors.margins: 10
-                                clip: true
-                                model: app_controller.log_lines
-
-                                delegate: Text {
-                                    required property string modelData
-
-                                    width: ListView.view.width
-                                    text: modelData
-                                    wrapMode: Text.WrapAnywhere
-                                    color: "#d8edf3"
-                                    font.family: "Monospace"
-                                    font.pixelSize: 12
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            DialogButtonBox {
-                Layout.fillWidth: true
-                standardButtons: DialogButtonBox.Close
-                onRejected: settings_dialog.close()
-            }
-        }
+    AboutDialog {
+        id: about_dialog
+        parent: window.contentItem
     }
 
     Dialog {
@@ -486,11 +383,10 @@ ApplicationWindow {
 
         ColumnLayout {
             anchors.fill: parent
-            spacing: 16
+            spacing: 10
 
             Label {
                 text: "Compare this code with the trusted-agent device before approving enrollment."
-                wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
 
@@ -505,15 +401,19 @@ ApplicationWindow {
                 }
             }
 
-            BusyIndicator {
-                running: verification_dialog.visible
-                Layout.alignment: Qt.AlignHCenter
-            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
 
-            Label {
-                text: "Waiting for trusted-agent response..."
-                color: palette.mid
-                Layout.alignment: Qt.AlignHCenter
+                BusyIndicator {
+                    running: verification_dialog.visible
+                }
+
+                Label {
+                    text: "Waiting for trusted-agent response..."
+                    color: palette.mid
+                    Layout.fillWidth: true
+                }
             }
         }
     }

@@ -19,6 +19,7 @@ void set_application_metadata()
     QGuiApplication::setOrganizationName(shared::desktop::core::app_metadata::organization_name);
     QGuiApplication::setOrganizationDomain(shared::desktop::core::app_metadata::organization_domain);
     QGuiApplication::setApplicationName(shared::desktop::core::app_metadata::gui_application_name);
+    QGuiApplication::setApplicationVersion(QStringLiteral("0.1.0"));
 }
 
 }

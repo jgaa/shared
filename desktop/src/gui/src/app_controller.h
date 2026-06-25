@@ -16,6 +16,7 @@
 #include <QtCore/QTimer>
 #include <QtCore/QVariantList>
 
+#include <functional>
 #include <optional>
 
 namespace shared::desktop::gui {
@@ -23,12 +24,25 @@ namespace shared::desktop::gui {
 class app_controller final : public QObject {
     Q_OBJECT
     Q_PROPERTY(QString app_name READ app_name CONSTANT)
+    Q_PROPERTY(QString application_version READ application_version CONSTANT)
+    Q_PROPERTY(QString qt_version READ qt_version CONSTANT)
+    Q_PROPERTY(QString build_abi READ build_abi CONSTANT)
+    Q_PROPERTY(QString build_timestamp READ build_timestamp CONSTANT)
     Q_PROPERTY(QString socket_path READ socket_path CONSTANT)
+    Q_PROPERTY(QString default_agent_name READ default_agent_name CONSTANT)
     Q_PROPERTY(bool configured READ configured NOTIFY state_changed)
     Q_PROPERTY(bool trusted_agent READ trusted_agent NOTIFY state_changed)
     Q_PROPERTY(QString configured_name READ configured_name NOTIFY state_changed)
     Q_PROPERTY(QString configured_peer_id READ configured_peer_id NOTIFY state_changed)
+    Q_PROPERTY(QString local_enrollment_host READ local_enrollment_host WRITE set_local_enrollment_host NOTIFY state_changed)
+    Q_PROPERTY(int local_enrollment_port READ local_enrollment_port WRITE set_local_enrollment_port NOTIFY state_changed)
+    Q_PROPERTY(QString local_peer_host READ local_peer_host WRITE set_local_peer_host NOTIFY state_changed)
+    Q_PROPERTY(int local_peer_port READ local_peer_port WRITE set_local_peer_port NOTIFY state_changed)
+    Q_PROPERTY(QString trusted_agent_host READ trusted_agent_host WRITE set_trusted_agent_host NOTIFY state_changed)
+    Q_PROPERTY(int trusted_agent_port READ trusted_agent_port WRITE set_trusted_agent_port NOTIFY state_changed)
+    Q_PROPERTY(int trusted_agent_peer_port READ trusted_agent_peer_port WRITE set_trusted_agent_peer_port NOTIFY state_changed)
     Q_PROPERTY(QString trusted_agent_fingerprint READ trusted_agent_fingerprint NOTIFY state_changed)
+    Q_PROPERTY(QVariantList verified_peers READ verified_peers NOTIFY peers_changed)
     Q_PROPERTY(QString last_error READ last_error NOTIFY state_changed)
     Q_PROPERTY(QVariantList pending_requests READ pending_requests NOTIFY state_changed)
     Q_PROPERTY(int clipboard_limit_megabytes READ clipboard_limit_megabytes WRITE set_clipboard_limit_megabytes NOTIFY clipboard_limit_megabytes_changed)
@@ -47,12 +61,25 @@ public:
     explicit app_controller(QObject *parent = nullptr);
 
     [[nodiscard]] QString app_name() const;
+    [[nodiscard]] QString application_version() const;
+    [[nodiscard]] QString qt_version() const;
+    [[nodiscard]] QString build_abi() const;
+    [[nodiscard]] QString build_timestamp() const;
     [[nodiscard]] QString socket_path() const;
+    [[nodiscard]] QString default_agent_name() const;
     [[nodiscard]] bool configured() const;
     [[nodiscard]] bool trusted_agent() const;
     [[nodiscard]] QString configured_name() const;
     [[nodiscard]] QString configured_peer_id() const;
+    [[nodiscard]] QString local_enrollment_host() const;
+    [[nodiscard]] int local_enrollment_port() const;
+    [[nodiscard]] QString local_peer_host() const;
+    [[nodiscard]] int local_peer_port() const;
+    [[nodiscard]] QString trusted_agent_host() const;
+    [[nodiscard]] int trusted_agent_port() const;
+    [[nodiscard]] int trusted_agent_peer_port() const;
     [[nodiscard]] QString trusted_agent_fingerprint() const;
+    [[nodiscard]] QVariantList verified_peers() const;
     [[nodiscard]] QString last_error() const;
     [[nodiscard]] QVariantList pending_requests() const;
     [[nodiscard]] int clipboard_limit_megabytes() const;
@@ -68,6 +95,13 @@ public:
     [[nodiscard]] QString join_verification_code() const;
 
     void set_clipboard_limit_megabytes(int value);
+    void set_local_enrollment_host(const QString &value);
+    void set_local_enrollment_port(int value);
+    void set_local_peer_host(const QString &value);
+    void set_local_peer_port(int value);
+    void set_trusted_agent_host(const QString &value);
+    void set_trusted_agent_port(int value);
+    void set_trusted_agent_peer_port(int value);
     void set_app_log_level(int value);
     void set_file_log_level(int value);
     void set_log_file_path(const QString &value);
@@ -92,16 +126,20 @@ signals:
     void clipboard_limit_megabytes_changed();
     void logging_settings_changed();
     void log_lines_changed();
+    void peers_changed();
     void state_changed();
 
 private:
     static constexpr int bytes_per_megabyte{1024 * 1024};
 
     void set_last_error(const QString &message);
+    [[nodiscard]] bool save_configuration_field(std::function<void(core::agent_configuration &)> update);
     void save_logging_value(const QString &key, const QVariant &value);
     void refresh_log_lines();
+    void refresh_verified_peers();
     void refresh_pending_requests();
     void finish_join_request();
+    [[nodiscard]] QString format_elapsed(qint64 last_communication_time_ms) const;
 
     core::app_paths app_paths_{};
     core::configuration_repository configuration_repository_{};
@@ -112,6 +150,7 @@ private:
     core::settings_repository settings_repository_{};
     core::agent_configuration configuration_{};
     QString trusted_agent_fingerprint_{};
+    QVariantList verified_peers_{};
     QString last_error_{};
     int clipboard_limit_megabytes_{};
     QStringList log_lines_{};
@@ -122,6 +161,7 @@ private:
     bool join_in_progress_{};
     QFutureWatcher<core::enrollment_client::result> join_watcher_{};
     QTimer log_refresh_timer_{};
+    QTimer peer_refresh_timer_{};
     QTimer pending_request_refresh_timer_{};
 };
 

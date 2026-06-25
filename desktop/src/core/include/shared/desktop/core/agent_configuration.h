@@ -14,6 +14,7 @@ enum class agent_role {
 struct trusted_agent_endpoint {
     QString host{};
     quint16 port{};
+    quint16 peer_port{47124};
     QString pinned_server_fingerprint{};
 };
 
@@ -22,7 +23,10 @@ struct agent_configuration {
     agent_role role{agent_role::unconfigured};
     QString peer_id{};
     QString name{};
+    QString enrollment_host{QStringLiteral("0.0.0.0")};
     quint16 enrollment_port{47123};
+    QString peer_host{QStringLiteral("0.0.0.0")};
+    quint16 peer_port{47124};
     trusted_agent_endpoint trusted_agent{};
 };
 

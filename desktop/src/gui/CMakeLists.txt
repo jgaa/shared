@@ -8,8 +8,12 @@ qt_add_qml_module(sharedgui
     URI Shared.Gui
     VERSION 1.0
     QML_FILES
+        qml/AboutDialog.qml
         qml/LogSettings.qml
+        qml/LogViewerDialog.qml
         qml/Main.qml
+        qml/PeersDialog.qml
+        qml/SettingsDialog.qml
 )
 
 target_link_libraries(sharedgui PRIVATE
