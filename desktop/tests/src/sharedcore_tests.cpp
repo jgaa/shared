@@ -88,6 +88,7 @@ private slots:
     void enrollment_fingerprint_normalization();
     void logging_controller_levels();
     void security_materials_bootstrap_flow();
+    void security_materials_remove_peer_from_signed_list();
 };
 
 void sharedcore_tests::envelope_io_round_trip()
@@ -383,6 +384,66 @@ void sharedcore_tests::security_materials_bootstrap_flow()
         security_materials.build_approved_decision(configuration, duplicate_name_request, duplicate_name_error);
     QVERIFY(!duplicate_name_decision.approved());
     QCOMPARE(duplicate_name_error, QStringLiteral("Peer list contains duplicate peer names"));
+}
+
+void sharedcore_tests::security_materials_remove_peer_from_signed_list()
+{
+    QTemporaryDir temporary_dir{};
+    QVERIFY(temporary_dir.isValid());
+    environment_guard guard{temporary_dir};
+
+    shared::desktop::core::app_paths app_paths{};
+    QVERIFY(app_paths.ensure_directories());
+
+    shared::desktop::core::security_materials security_materials{app_paths};
+
+    const auto trusted_agent_result = security_materials.initialize_local_trusted_agent(
+        QStringLiteral("trusted-box"),
+        47123);
+    QVERIFY2(trusted_agent_result.success, qPrintable(trusted_agent_result.error_message));
+
+    shared::desktop::core::agent_configuration configuration{};
+    configuration.initialized = true;
+    configuration.role = shared::desktop::core::agent_role::local_trusted_agent;
+    configuration.peer_id = trusted_agent_result.peer_id;
+    configuration.name = QStringLiteral("trusted-box");
+    configuration.enrollment_port = 47123;
+    configuration.peer_port = 47124;
+
+    const auto enrollment = security_materials.prepare_enrollment_request(QStringLiteral("joining-box"));
+    QVERIFY2(enrollment.success, qPrintable(enrollment.error_message));
+
+    shared::desktop::core::pending_enrollment_request request{};
+    request.request_id = QStringLiteral("request-1");
+    request.peer_id = enrollment.peer_id;
+    request.name = QStringLiteral("joining-box");
+    request.verification_code = enrollment.verification_code;
+    request.certificate_request = enrollment.request.certificateRequest();
+    request.x25519_public_key = enrollment.request.x25519PublicKey();
+    request.created_time_ms = 12345;
+
+    QString approval_error{};
+    const auto decision = security_materials.build_approved_decision(configuration, request, approval_error);
+    QVERIFY2(approval_error.isEmpty(), qPrintable(approval_error));
+    QVERIFY(decision.approved());
+
+    const auto removal_result = security_materials.remove_peer_from_current_peer_list(configuration, enrollment.peer_id);
+    QVERIFY2(removal_result.success, qPrintable(removal_result.error_message));
+
+    QString peer_list_error{};
+    const auto current_peer_list = security_materials.current_peer_list(peer_list_error);
+    QVERIFY2(peer_list_error.isEmpty(), qPrintable(peer_list_error));
+    QCOMPARE(current_peer_list.version(), static_cast<quint32>(3));
+    QCOMPARE(current_peer_list.peers().size(), 1);
+    QCOMPARE(current_peer_list.peers().first().identity().peerId().uuid(), trusted_agent_result.peer_id);
+
+    QString known_peer_error{};
+    QVERIFY(!security_materials.is_known_peer_identity(
+        enrollment.peer_id,
+        QStringLiteral("joining-box"),
+        decision.peerList().peers().last().certificateFingerprintSha256(),
+        known_peer_error));
+    QCOMPARE(known_peer_error, QStringLiteral("Peer is not present in the signed peer list"));
 }
 
 }

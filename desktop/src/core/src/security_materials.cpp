@@ -956,6 +956,95 @@ security_materials::peer_list_update_result security_materials::store_peer_list_
     return result;
 }
 
+security_materials::operation_result security_materials::remove_peer_from_current_peer_list(
+    const agent_configuration &configuration,
+    const QString &peer_id) const
+{
+    operation_result result{};
+    const auto normalized_peer_id = peer_id.trimmed();
+    if (configuration.role != agent_role::local_trusted_agent) {
+        result.error_message = QStringLiteral("Only the trusted agent can remove authorized peers");
+        return result;
+    }
+
+    if (normalized_peer_id.isEmpty()) {
+        result.error_message = QStringLiteral("Peer id is required");
+        return result;
+    }
+
+    if (normalized_peer_id == configuration.peer_id) {
+        result.error_message = QStringLiteral("The trusted agent cannot remove itself");
+        return result;
+    }
+
+    QString error_message{};
+    auto current_peer_list = load_peer_list(error_message);
+    if (!error_message.isEmpty()) {
+        result.error_message = error_message;
+        return result;
+    }
+
+    auto entries = current_peer_list.peers();
+    auto removed = false;
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
+        if (it->identity().peerId().uuid() != normalized_peer_id) {
+            continue;
+        }
+
+        qCInfo(shared_security_materials_log)
+            << "Removing peer from signed peer list"
+            << "peer_id=" << normalized_peer_id
+            << "name=" << it->identity().name()
+            << "current_version=" << current_peer_list.version();
+        entries.erase(it);
+        removed = true;
+        break;
+    }
+
+    if (!removed) {
+        result.error_message = QStringLiteral("Peer is not present in the signed peer list");
+        return result;
+    }
+
+    shared::v1::PeerList next_peer_list{};
+    next_peer_list.setVersion(current_peer_list.version() + 1);
+    next_peer_list.setCreatedTimeMs(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch());
+    next_peer_list.setTrustedAgentPeerId(current_peer_list.trustedAgentPeerId());
+    next_peer_list.setPeers(entries);
+
+    if (!validate_peer_entries(next_peer_list.peers(), error_message)) {
+        result.error_message = error_message;
+        return result;
+    }
+
+    shared::v1::PeerListToSign peer_list_to_sign{};
+    peer_list_to_sign.setVersion(next_peer_list.version());
+    peer_list_to_sign.setCreatedTimeMs(next_peer_list.createdTimeMs());
+    peer_list_to_sign.setTrustedAgentPeerId(next_peer_list.trustedAgentPeerId());
+    peer_list_to_sign.setPeers(next_peer_list.peers());
+
+    const auto signature = sign_peer_list_payload(peer_list_to_sign, error_message);
+    if (signature.isEmpty()) {
+        result.error_message = error_message;
+        return result;
+    }
+
+    next_peer_list.setSignature(signature);
+    next_peer_list.setSignatureAlgorithm(QStringLiteral("sha256-ecdsa"));
+
+    if (!write_peer_list(next_peer_list, error_message)) {
+        result.error_message = error_message;
+        return result;
+    }
+
+    qCInfo(shared_security_materials_log)
+        << "Removed peer from signed peer list"
+        << "peer_id=" << normalized_peer_id
+        << "new_version=" << next_peer_list.version();
+    result.success = true;
+    return result;
+}
+
 bool security_materials::validate_peer_list(
     const shared::v1::PeerList &peer_list,
     QString &error_message) const

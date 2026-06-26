@@ -62,6 +62,9 @@ public:
     [[nodiscard]] shared::v1::PeerList current_peer_list(QString &error_message) const;
     [[nodiscard]] peer_list_update_result store_peer_list_if_newer(
         const shared::v1::PeerList &peer_list) const;
+    [[nodiscard]] operation_result remove_peer_from_current_peer_list(
+        const agent_configuration &configuration,
+        const QString &peer_id) const;
     [[nodiscard]] bool validate_peer_list(
         const shared::v1::PeerList &peer_list,
         QString &error_message) const;

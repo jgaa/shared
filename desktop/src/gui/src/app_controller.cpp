@@ -892,6 +892,51 @@ bool app_controller::send_files_to_peer(const QString &peer_id, const QStringLis
     return true;
 }
 
+bool app_controller::remove_authorized_peer(const QString &peer_id)
+{
+    set_last_error({});
+    if (configuration_.role != core::agent_role::local_trusted_agent) {
+        set_last_error(QStringLiteral("Only the trusted agent can remove authorized peers"));
+        return false;
+    }
+
+    const auto normalized_peer_id = peer_id.trimmed();
+    if (normalized_peer_id.isEmpty()) {
+        set_last_error(QStringLiteral("Peer id is required"));
+        return false;
+    }
+
+    qCInfo(shared_gui_app_controller_log)
+        << "Authorized peer removal requested"
+        << "peer_id=" << normalized_peer_id;
+
+    try {
+        const auto result = security_materials_.remove_peer_from_current_peer_list(configuration_, normalized_peer_id);
+        if (!result.success) {
+            qCCritical(shared_gui_app_controller_log)
+                << "Failed to remove authorized peer"
+                << "peer_id=" << normalized_peer_id
+                << result.error_message;
+            set_last_error(result.error_message);
+            return false;
+        }
+
+        qCInfo(shared_gui_app_controller_log)
+            << "Removed authorized peer"
+            << "peer_id=" << normalized_peer_id;
+        refresh_verified_peers();
+        emit peers_changed();
+        return true;
+    } catch (const std::exception &exception) {
+        qCCritical(shared_gui_app_controller_log)
+            << "Remove authorized peer threw"
+            << "peer_id=" << normalized_peer_id
+            << exception.what();
+        set_last_error(QString::fromUtf8(exception.what()));
+        return false;
+    }
+}
+
 bool app_controller::approve_clipboard_transfer()
 {
     if (service_ == nullptr || clipboard_approval_transfer_id_.isEmpty()) {

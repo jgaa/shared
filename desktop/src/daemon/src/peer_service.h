@@ -135,6 +135,7 @@ private:
         QString transfer_id{};
         QString recipient_peer_id{};
         QString recipient_name{};
+        QString relay_peer_id{};
         QByteArray plaintext{};
         shared::v1::TransferChunk chunk{};
         bool chunk_sent{};
@@ -144,6 +145,7 @@ private:
         QString transfer_id{};
         QString recipient_peer_id{};
         QString recipient_name{};
+        QString relay_peer_id{};
         QString file_path{};
         QString filename{};
         QString mime_type{};
@@ -158,6 +160,7 @@ private:
         QString transfer_id{};
         QString sender_peer_id{};
         QString sender_name{};
+        QString relay_peer_id{};
         QByteArray expected_sha256{};
         quint64 expected_size{};
         bool approved{};
@@ -168,6 +171,7 @@ private:
         QString transfer_id{};
         QString sender_peer_id{};
         QString sender_name{};
+        QString relay_peer_id{};
         QString filename{};
         QString final_path{};
         QString temp_path{};
@@ -243,13 +247,45 @@ private:
         QSslSocket *socket,
         quint32 request_id,
         const shared::v1::WhoHasReply &who_has_reply);
+    void handle_relay_envelope(QSslSocket *socket, const shared::v1::RelayEnvelope &relay_envelope);
     void handle_transfer_offer(QSslSocket *socket, const shared::v1::TransferOffer &transfer_offer);
+    void handle_transfer_offer(
+        QSslSocket *socket,
+        const shared::v1::TransferOffer &transfer_offer,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
     void handle_transfer_status(QSslSocket *socket, const shared::v1::TransferStatus &transfer_status);
+    void handle_transfer_status(
+        QSslSocket *socket,
+        const shared::v1::TransferStatus &transfer_status,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
     void handle_transfer_chunk(QSslSocket *socket, const shared::v1::TransferChunk &transfer_chunk);
-    void handle_clipboard_transfer_offer(QSslSocket *socket, const shared::v1::TransferOffer &transfer_offer);
-    void handle_file_transfer_offer(QSslSocket *socket, const shared::v1::TransferOffer &transfer_offer);
-    void handle_clipboard_transfer_chunk(QSslSocket *socket, const shared::v1::TransferChunk &transfer_chunk);
-    void handle_file_transfer_chunk(QSslSocket *socket, const shared::v1::TransferChunk &transfer_chunk);
+    void handle_transfer_chunk(
+        QSslSocket *socket,
+        const shared::v1::TransferChunk &transfer_chunk,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
+    void handle_clipboard_transfer_offer(
+        QSslSocket *socket,
+        const shared::v1::TransferOffer &transfer_offer,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
+    void handle_file_transfer_offer(
+        QSslSocket *socket,
+        const shared::v1::TransferOffer &transfer_offer,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
+    void handle_clipboard_transfer_chunk(
+        QSslSocket *socket,
+        const shared::v1::TransferChunk &transfer_chunk,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
+    void handle_file_transfer_chunk(
+        QSslSocket *socket,
+        const shared::v1::TransferChunk &transfer_chunk,
+        const QString &source_peer_id,
+        const QString &relay_peer_id);
     void maybe_connect_to_peer(
         const shared::v1::PeerListEntry &peer,
         const QList<shared::v1::PeerAddress> &addresses);
@@ -272,12 +308,31 @@ private:
     [[nodiscard]] QStringList current_directly_connected_peer_ids() const;
     void schedule_reachability_broadcast();
     void clear_reachability_claims_for_advertiser(const QString &advertiser_peer_id);
+    void enforce_authorized_peer_sessions(const shared::v1::PeerList &peer_list, const QString &reason);
     [[nodiscard]] bool purge_expired_reachability_claims();
     [[nodiscard]] bool peer_has_active_reachability_advertiser(const QString &peer_id) const;
     [[nodiscard]] QStringList direct_relay_candidates_for_peer(const QString &peer_id) const;
     [[nodiscard]] QCoro::Task<std::optional<QString>> resolve_relay_peer(
         const QString &destination_peer_id,
         const QString &transfer_id);
+    [[nodiscard]] QByteArray serialize_inner_envelope(const shared::v1::Envelope &envelope) const;
+    [[nodiscard]] bool deserialize_inner_envelope(
+        const QByteArray &bytes,
+        shared::v1::Envelope &envelope,
+        QString &error_message) const;
+    [[nodiscard]] QString transfer_id_for_envelope(const shared::v1::Envelope &envelope) const;
+    [[nodiscard]] bool send_relay_envelope(
+        const QString &relay_peer_id,
+        const QString &destination_peer_id,
+        const shared::v1::Envelope &inner_envelope,
+        const QString &context,
+        outbound_priority priority);
+    [[nodiscard]] bool send_envelope_to_peer(
+        const QString &destination_peer_id,
+        const QString &relay_peer_id,
+        const shared::v1::Envelope &envelope,
+        const QString &context,
+        outbound_priority priority);
     [[nodiscard]] QSslSocket *authenticated_socket_for_peer(const QString &peer_id) const;
     [[nodiscard]] std::optional<shared::v1::PeerListEntry> peer_entry_for_id(const QString &peer_id) const;
     [[nodiscard]] QByteArray payload_key_for_recipient(
@@ -312,6 +367,13 @@ private:
         const QString &message);
     void send_transfer_status(
         QSslSocket *socket,
+        const QString &transfer_id,
+        shared::v1::TransferStatusCodeGadget::TransferStatusCode status,
+        shared::v1::ErrorCodeGadget::ErrorCode error_code,
+        const QString &message);
+    bool send_transfer_status_to_peer(
+        const QString &destination_peer_id,
+        const QString &relay_peer_id,
         const QString &transfer_id,
         shared::v1::TransferStatusCodeGadget::TransferStatusCode status,
         shared::v1::ErrorCodeGadget::ErrorCode error_code,

@@ -5,6 +5,9 @@ import QtQuick.Layouts
 Dialog {
     id: root
 
+    property string pendingRemovalPeerId: ""
+    property string pendingRemovalPeerName: ""
+
     anchors.centerIn: parent
     modal: true
     focus: true
@@ -94,6 +97,17 @@ Dialog {
                                 text: "Last: " + modelData.last_communicated
                                 color: palette.mid
                             }
+
+                            ToolButton {
+                                visible: app_controller.trusted_agent
+                                text: "Delete"
+                                icon.name: "edit-delete"
+                                onClicked: {
+                                    root.pendingRemovalPeerId = modelData.peer_id
+                                    root.pendingRemovalPeerName = modelData.name
+                                    confirm_remove_dialog.open()
+                                }
+                            }
                         }
                     }
                 }
@@ -105,6 +119,36 @@ Dialog {
                 text: "No verified peers are available yet."
                 color: palette.mid
             }
+        }
+    }
+
+    Dialog {
+        id: confirm_remove_dialog
+
+        anchors.centerIn: parent
+        modal: true
+        title: "Remove Authorized Peer"
+        standardButtons: Dialog.Yes | Dialog.No
+
+        onAccepted: {
+            if (root.pendingRemovalPeerId.length > 0) {
+                app_controller.remove_authorized_peer(root.pendingRemovalPeerId)
+            }
+            root.pendingRemovalPeerId = ""
+            root.pendingRemovalPeerName = ""
+        }
+
+        onRejected: {
+            root.pendingRemovalPeerId = ""
+            root.pendingRemovalPeerName = ""
+        }
+
+        contentItem: Label {
+            width: 360
+            wrapMode: Text.WordWrap
+            text: root.pendingRemovalPeerName.length > 0
+                ? "Remove " + root.pendingRemovalPeerName + " from the list of authorized agents? Existing connections to that peer will be dropped."
+                : "Remove this peer from the list of authorized agents? Existing connections to that peer will be dropped."
         }
     }
 }
