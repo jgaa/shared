@@ -2,71 +2,64 @@
 
 # shared
 
-shared is a server-less peer-to-peer application for transferring clipboard text and files between untrusted devices.
+shared is a server-less peer-to-peer application for transferring clipboard text and files between devices that do not fully trust each other.
 
-The project is intended for users operating multiple physical hosts with multiple logins, virtual machines, and Android devices in environments where different machines have different trust levels.
+A designated desktop peer acts as the trusted agent and owns the certificate authority. After enrollment, peers communicate directly or through a single relay hop without any central server.
 
-shared avoids unnecessary complexity and intentionally does not depend on:
+## Current Security Model
 
-* HTTP
-* gRPC
-* WebSocket
-* JavaScript
-* Node.js
-* Browsers
-* Cloud services
+Authenticated peer transport:
 
-A designated desktop instance acts as a trusted agent and owns the certificate authority. After enrollment, no server is required.
+* mutual TLS on the peer port
+
+Current end-to-end payload encryption:
+
+* file transfers
+* clipboard transfers
 
 ## Goals
 
-* Secure file transfer.
-* Secure clipboard transfer.
-* Mutual TLS authentication.
-* Server-less operation.
-* Automatic peer discovery.
-* Offline trust propagation.
-* Relay through connected peers.
-* End-to-end encryption.
-* Minimal dependencies.
+* interoperable peer-to-peer file transfer
+* interoperable peer-to-peer clipboard transfer
+* mutual TLS authentication
+* signed peer-list trust propagation
+* automatic address gossip
+* optional single-hop relay
+* minimal dependencies
 
 ## Non-goals
 
-* Shared folders.
-* Automatic clipboard synchronization.
-* Multi-user operation.
-* Multi-hop routing.
-* Cloud storage.
-* Web interfaces.
+* shared folders
+* automatic clipboard synchronization
+* multi-user operation inside one app instance
+* multi-hop routing
+* cloud services
+* web interfaces
 
 ## Architecture
 
-One logged-in user session = one peer.
+One logged-in user session is one peer.
 
-A session is identified to machines an UUID and to humans as `user@host`. The human name is configureable.
+Peers are identified on the wire by UUIDs and to humans by a configured display name.
 
-The trusted agent maintains the signed peer list.
+The trusted agent maintains and signs the authoritative peer list.
 
-Peers establish direct connections whenever possible.
-
-When direct connectivity is unavailable, a single relay hop may be used.
-
-Clipboard and file transfer are applications built on top of a secure device message bus.
+Peers prefer direct authenticated sessions. If direct connectivity is unavailable, transfers may use one authenticated relay peer.
 
 ## Specification Files
 
 `PROTOCOL.md`
 
-Wire protocol, trust rules, discovery, routing, and transfer behavior.
+Wire behavior, enrollment, peer authentication, peer-list propagation, routing, relay behavior, and transfer state machines.
 
 `CRYPTO.md`
 
-Cryptographic profile, enrollment verification code, key agreement, and local secret storage guidance.
+Certificate profile, peer-list signing, file-transfer encryption, clipboard non-encryption, and secret-handling requirements.
 
 `DESKTOP.md`
 
-Desktop implementation constraints and platform behavior.
+Desktop implementation constraints and product behavior.
 
 `ANDROID.md`
 
-Android implementation constraints and platform behavior.
+Android implementation guidance for interoperating from the spec alone.

@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 Dialog {
     id: root
+    required property var app_controller
 
     anchors.centerIn: parent
     modal: true

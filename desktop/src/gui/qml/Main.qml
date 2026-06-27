@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 ApplicationWindow {
     id: window
+    required property var app_controller
 
     function droppedUrlsToStrings(urls) {
         const selected = []
@@ -76,6 +77,15 @@ ApplicationWindow {
             Action {
                 text: "Settings"
                 onTriggered: settings_dialog.open()
+            }
+
+            MenuSeparator {
+            }
+
+            Action {
+                text: "Reinitialize"
+                enabled: app_controller.configured && !app_controller.join_in_progress
+                onTriggered: reinitialize_dialog.open()
             }
 
             MenuSeparator {
@@ -504,16 +514,19 @@ ApplicationWindow {
     SettingsDialog {
         id: settings_dialog
         parent: window.contentItem
+        app_controller: window.app_controller
     }
 
     LogViewerDialog {
         id: log_viewer_dialog
         parent: window.contentItem
+        app_controller: window.app_controller
     }
 
     PeersDialog {
         id: peers_dialog
         parent: window.contentItem
+        app_controller: window.app_controller
     }
 
     SendClipboardDialog {
@@ -531,6 +544,24 @@ ApplicationWindow {
     AboutDialog {
         id: about_dialog
         parent: window.contentItem
+        app_controller: window.app_controller
+    }
+
+    Dialog {
+        id: reinitialize_dialog
+
+        anchors.centerIn: parent
+        modal: true
+        title: "Reinitialize Local Agent"
+        standardButtons: Dialog.Yes | Dialog.No
+
+        onAccepted: app_controller.reinitialize_local_agent()
+
+        contentItem: Label {
+            width: 420
+            wrapMode: Text.WordWrap
+            text: "Clear this machine's current trusted-agent or peer enrollment and return to first-run setup? Reinitialize the new trusted agent first, then reinitialize every other agent before joining them to it."
+        }
     }
 
     Dialog {

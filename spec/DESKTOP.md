@@ -2,159 +2,101 @@
 
 Desktop platforms:
 
-Linux
+* Linux
+* macOS
+* Windows
 
-macOS
+Current implementation language:
 
-Windows
-
-Implementation language:
-
-C++ and Qt
+* C++
+* Qt
 
 ## Components
 
-shared-core
+`shared-core`
 
-Cross-platform library containing:
+Shared desktop logic for:
 
-* protocol
-* routing
-* transfer logic
-* encryption
-* database
+* enrollment materials
+* peer-list validation
+* protobuf framing
+* transfer crypto
+* local configuration and settings
 
-shared-daemon
+`shared-daemon`
 
-Background service.
+Background user-session service responsible for:
 
-Responsibilities:
+* peer networking
+* mTLS peer authentication
+* address-hint gossip
+* reachability tracking
+* relay handling
+* transfer offer, approval, and chunk handling
 
-* networking
-* peer discovery
-* transfer management
-* history
+`shared-gui`
 
-shared-gui
+Qt GUI responsible for:
 
-Qt application.
+* trusted-agent initialization
+* enrollment approval
+* peer list and connection status
+* clipboard sending
+* file sending
+* transfer settings
 
-Features:
+## Run as User
 
-* enrollment
-* peer list
-* status
+shared runs as the logged-in user.
+
+It is not a system daemon and does not require root.
+
+Each user profile has its own:
+
+* TLS keypair and certificate
+* static X25519 keypair
+* peer UUID
+* trusted-agent state
+* signed peer list
 * settings
-* transfer history
-* clipboard size limits
-
-sharedctl
-
-CLI helper.
-
-Examples:
-
-shared send-files --choose file1
-
-shared send-files --all file1
-
-shared send-clipboard --choose
-
-shared send-clipboard --all
-
-## Run as user
-
-shared always runs as the logged-in user.
-
-It is not a system daemon.
-
-It does not run as root.
-
-Each user has independent:
-- certificate
-- static X25519 private key
-- peer UUID
-- settings
-- database
-- transfer history
-- download directory
-- temporary files
-- local IPC socket
-
-**paths**
-- config:     ~/.config/shared/
-- data:       ~/.local/share/shared/
-- cache/tmp:  ~/.cache/shared/
-- socket:     $XDG_RUNTIME_DIR/shared/socket
-
-Fallback socket path if needed: /tmp/shared-$UID/socket
-
-## Tray Icon
-
-Green:
-Connected
-
-Gray:
-Offline
-
-Yellow:
-Attention required
-
-Red:
-Error
-
-Menu:
-
-Send clipboard...
-
-Send clipboard to all peers
-
-Peers
-
-Received files
-
-Settings
-
-Quit
-
-## File Managers
-
-Networking awareness is not required.
-
-File managers invoke sharedctl.
-
-Example:
-
-Send with Shared...
-
-Send with Shared to all peers...
-
-sharedctl opens peer selection dialogs.
+* download directory
+* temporary files
+* local IPC/socket state
 
 ## Trusted Agent
 
-Only desktop peers may own the certificate authority.
+Only a desktop peer may own the certificate authority.
 
-Desktop peers are responsible for:
+The trusted agent is responsible for:
 
-* approving peers
-* signing certificates
+* approving or rejecting enrollment requests
+* signing peer certificates
 * signing peer lists
-* notifying connected authenticated peers when the signed peer list changes
+* broadcasting newer peer lists to connected authenticated peers
 
-Desktop peers and non-agent peers both expose a dedicated peer mTLS listener separate from the trusted-agent enrollment listener.
+The trusted agent may go offline after peers have enrolled.
 
-The trusted agent may be offline after enrollment.
+## Desktop Transfer Behavior
+
+Current desktop behavior includes:
+
+* configurable clipboard receive limit, default 1 MiB and clamped to 8 MiB max
+* optional auto-accept for clipboard transfers
+* optional auto-accept for file transfers
+* incoming file staging into a temporary `.part` file before final rename
+
+Desktop currently implements:
+
+* end-to-end encrypted clipboard transfer
+* end-to-end encrypted file transfer
 
 ## Secret Storage
 
-Use a local secret storage abstraction.
+Desktop implementations should use platform secure storage when practical.
 
-On KDE, use KWallet when available in the installed Qt stack.
+Required long-lived secrets include:
 
-The same abstraction should store:
-
-* the peer TLS private key
-* the peer static X25519 private key
-* trusted agent CA private material
-* pinned trusted agent verification credentials
+* peer TLS private key
+* peer static X25519 private key
+* trusted-agent CA private key on the trusted agent
+* pinned trusted-agent CA certificate on non-agent peers

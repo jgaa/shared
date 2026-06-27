@@ -38,6 +38,8 @@ public:
 
     explicit security_materials(const app_paths &app_paths);
 
+    [[nodiscard]] operation_result reset_local_agent_state() const;
+
     [[nodiscard]] trusted_agent_init_result initialize_local_trusted_agent(
         const QString &name,
         quint16 enrollment_port) const;

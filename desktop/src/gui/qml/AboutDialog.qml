@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 Dialog {
     id: root
+    required property var app_controller
 
     anchors.centerIn: parent
     modal: true
@@ -11,63 +12,88 @@ Dialog {
     title: qsTr("About Shared")
     standardButtons: Dialog.Ok
     width: Math.min(parent ? parent.width - 80 : 520, 520)
-    height: Math.min(parent ? parent.height - 80 : implicitHeight, 520)
+    height: Math.min(parent ? parent.height - 80 : 520, 520)
     padding: 16
 
-    contentItem: ScrollView {
-        clip: true
-        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        contentWidth: availableWidth
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 12
 
-        Column {
-            width: parent.availableWidth
-            spacing: 16
+        ScrollView {
+            id: details_view
 
-            Label {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: qsTr("Shared is a server-less peer-to-peer application for securely transferring clipboard text and files between devices without relying on a central service.")
-            }
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-            GridLayout {
-                width: parent.width
-                columns: 2
-                columnSpacing: 16
-                rowSpacing: 8
+            Column {
+                width: details_view.availableWidth
+                spacing: 16
 
-                Label { text: "App version" }
-                Label { text: app_controller.application_version }
+                Label {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Shared is a server-less peer-to-peer application for securely transferring clipboard text and files between devices without relying on a central service.")
+                }
 
-                Label { text: "Qt version" }
-                Label { text: app_controller.qt_version }
+                GridLayout {
+                    width: parent.width
+                    columns: 2
+                    columnSpacing: 16
+                    rowSpacing: 8
 
-                Label { text: qsTr("OpenSSL library") }
-                Label { text: app_controller.openssl_library_version }
+                    Label { text: "App version" }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WrapAnywhere
+                        text: app_controller.application_version
+                    }
 
-                Label { text: qsTr("License") }
-                Label { text: qsTr("GPL 3") }
-            }
+                    Label { text: "Qt version" }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WrapAnywhere
+                        text: app_controller.qt_version
+                    }
 
-            Label {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                textFormat: Text.RichText
-                text: qsTr('Developed by <a href="https://lastviking.eu/">The Last Viking LTD</a>')
-                onLinkActivated: function(link) { Qt.openUrlExternally(link) }
-            }
+                    Label { text: qsTr("OpenSSL library") }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WrapAnywhere
+                        text: app_controller.openssl_library_version
+                    }
 
-            Label {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: qsTr("Shared is intended for users working across multiple hosts, VMs, and trust boundaries where clipboard and file exchange should stay local and encrypted.")
-            }
+                    Label { text: qsTr("License") }
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WrapAnywhere
+                        text: qsTr("GPL 3")
+                    }
+                }
 
-            Label {
-                width: parent.width
-                wrapMode: Text.WordWrap
-                textFormat: Text.RichText
-                text: 'On GitHub: <a href="https://github.com/jgaa/shared">https://github.com/jgaa/shared</a>'
-                onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                Label {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.RichText
+                    text: qsTr('Developed by <a href="https://lastviking.eu/">The Last Viking LTD</a>')
+                    onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Shared is intended for users working across multiple hosts, VMs, and trust boundaries where clipboard and file exchange should stay local and encrypted.")
+                }
+
+                Label {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.RichText
+                    text: 'On GitHub: <a href="https://github.com/jgaa/shared">https://github.com/jgaa/shared</a>'
+                    onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                }
             }
         }
     }

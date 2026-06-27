@@ -103,6 +103,9 @@ int main(int argc, char *argv[])
         &shared::desktop::gui::app_controller::configuration_changed,
         &service,
         &shared::desktop::daemon::daemon_application::apply_configuration_change);
+    engine.setInitialProperties({
+        {QStringLiteral("app_controller"), QVariant::fromValue(&controller)},
+    });
     engine.rootContext()->setContextProperty(QStringLiteral("app_controller"), &controller);
 
     QObject::connect(

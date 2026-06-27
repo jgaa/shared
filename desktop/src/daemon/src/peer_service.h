@@ -136,7 +136,7 @@ private:
         QString recipient_peer_id{};
         QString recipient_name{};
         QString relay_peer_id{};
-        QByteArray plaintext{};
+        QByteArray payload_key{};
         shared::v1::TransferChunk chunk{};
         bool chunk_sent{};
     };
@@ -161,6 +161,7 @@ private:
         QString sender_peer_id{};
         QString sender_name{};
         QString relay_peer_id{};
+        QByteArray payload_key{};
         QByteArray expected_sha256{};
         quint64 expected_size{};
         bool approved{};

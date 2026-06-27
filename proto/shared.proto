@@ -91,7 +91,8 @@ message PeerAddress {
 message Envelope {
   uint32 protocol_version = 1; // v1 = 1
 
-  // UUIDv7 string for tracing/logging/deduplication.
+  // Opaque sender-generated lowercase UUID string for tracing/logging/deduplication.
+  // Current desktop peer sessions use random UUIDs here and receivers must not infer a UUID version.
   string message_id = 2;
 
   // Optional request correlation ID.
@@ -131,7 +132,7 @@ message PeerInfo {
   // Port where this peer accepts incoming TCP/mTLS connections.
   uint32 listen_port = 3;
 
-  // UUIDv7 string. Used for duplicate connection tie-breaks.
+  // Opaque sender-generated lowercase UUID string used for duplicate connection tie-breaks.
   string connection_id = 4;
 
   repeated PeerAddress known_addresses = 5;
@@ -152,6 +153,7 @@ message PeerList {
   // Signature over deterministically serialized PeerListToSign.
   bytes signature = 5;
 
+  // v1 current desktop value: "sha256-ecdsa".
   string signature_algorithm = 6;
 }
 

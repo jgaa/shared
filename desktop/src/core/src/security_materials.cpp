@@ -3,6 +3,7 @@
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/envelope_io.h"
 
+#include <QtCore/QDir>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QFile>
@@ -148,6 +149,30 @@ void remove_if_exists(const QString &path, const QString &message)
 {
     if (!QFile::remove(path) && QFile::exists(path)) {
         throw_security_error(message);
+    }
+}
+
+void remove_directory_contents(const QString &path, const QString &message)
+{
+    QDir directory{path};
+    if (!directory.exists()) {
+        return;
+    }
+
+    const auto entries = directory.entryInfoList(
+        QDir::NoDotAndDotDot | QDir::AllEntries | QDir::Hidden | QDir::System);
+    for (const auto &entry : entries) {
+        if (entry.isDir()) {
+            QDir child{entry.absoluteFilePath()};
+            if (!child.removeRecursively()) {
+                throw_security_error(message + QStringLiteral(": ") + entry.absoluteFilePath());
+            }
+            continue;
+        }
+
+        if (!QFile::remove(entry.absoluteFilePath()) && QFile::exists(entry.absoluteFilePath())) {
+            throw_security_error(message + QStringLiteral(": ") + entry.absoluteFilePath());
+        }
     }
 }
 
@@ -537,6 +562,40 @@ x509_req_ptr create_certificate_request(EVP_PKEY *key, const QString &common_nam
 security_materials::security_materials(const app_paths &app_paths)
     : app_paths_{app_paths}
 {
+}
+
+security_materials::operation_result security_materials::reset_local_agent_state() const
+{
+    operation_result result{};
+    result.success = true;
+
+    try {
+        remove_if_exists(app_paths_.ca_key_path(), QStringLiteral("Failed to remove trusted-agent CA private key"));
+        remove_if_exists(app_paths_.ca_certificate_path(), QStringLiteral("Failed to remove trusted-agent CA certificate"));
+        remove_if_exists(app_paths_.ca_serial_path(), QStringLiteral("Failed to remove trusted-agent CA serial file"));
+        remove_if_exists(app_paths_.server_key_path(), QStringLiteral("Failed to remove trusted-agent server private key"));
+        remove_if_exists(app_paths_.server_certificate_path(), QStringLiteral("Failed to remove trusted-agent server certificate"));
+        remove_if_exists(app_paths_.server_certificate_der_path(), QStringLiteral("Failed to remove trusted-agent server DER certificate"));
+        remove_if_exists(
+            app_paths_.pinned_trusted_agent_ca_certificate_path(),
+            QStringLiteral("Failed to remove pinned trusted-agent CA certificate"));
+        remove_if_exists(app_paths_.peer_key_path(), QStringLiteral("Failed to remove peer private key"));
+        remove_if_exists(app_paths_.peer_certificate_path(), QStringLiteral("Failed to remove peer certificate"));
+        remove_if_exists(app_paths_.peer_certificate_der_path(), QStringLiteral("Failed to remove peer DER certificate"));
+        remove_if_exists(app_paths_.peer_csr_der_path(), QStringLiteral("Failed to remove peer CSR"));
+        remove_if_exists(app_paths_.x25519_private_key_path(), QStringLiteral("Failed to remove X25519 private key"));
+        remove_if_exists(app_paths_.peer_list_path(), QStringLiteral("Failed to remove signed peer list"));
+        remove_if_exists(app_paths_.address_hints_path(), QStringLiteral("Failed to remove address hints"));
+        remove_if_exists(app_paths_.peer_status_path(), QStringLiteral("Failed to remove peer status cache"));
+        remove_directory_contents(
+            app_paths_.pending_enrollments_dir(),
+            QStringLiteral("Failed to clear pending enrollment state"));
+    } catch (const std::exception &exception) {
+        result.success = false;
+        result.error_message = QString::fromUtf8(exception.what());
+    }
+
+    return result;
 }
 
 security_materials::trusted_agent_init_result security_materials::initialize_local_trusted_agent(

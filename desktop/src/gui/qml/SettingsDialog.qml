@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 Dialog {
     id: root
+    required property var app_controller
 
     property int currentPane: 0
 
@@ -245,6 +246,7 @@ Dialog {
 
                     LogSettings {
                         id: log_settings
+                        app_controller: root.app_controller
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                     }

@@ -5,6 +5,7 @@
 #include "shared/desktop/core/logging_controller.h"
 #include "shared/desktop/core/pending_enrollment_repository.h"
 #include "shared/desktop/core/security_materials.h"
+#include "shared/desktop/core/transfer_crypto.h"
 
 #include "shared.qpb.h"
 
@@ -88,7 +89,9 @@ private slots:
     void enrollment_fingerprint_normalization();
     void logging_controller_levels();
     void security_materials_bootstrap_flow();
+    void security_materials_reset_local_agent_state();
     void security_materials_remove_peer_from_signed_list();
+    void transfer_crypto_wrap_unwrap_round_trip();
 };
 
 void sharedcore_tests::envelope_io_round_trip()
@@ -386,6 +389,63 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     QCOMPARE(duplicate_name_error, QStringLiteral("Peer list contains duplicate peer names"));
 }
 
+void sharedcore_tests::security_materials_reset_local_agent_state()
+{
+    QTemporaryDir temporary_dir{};
+    QVERIFY(temporary_dir.isValid());
+    environment_guard guard{temporary_dir};
+
+    shared::desktop::core::app_paths app_paths{};
+    QVERIFY(app_paths.ensure_directories());
+
+    shared::desktop::core::security_materials security_materials{app_paths};
+    shared::desktop::core::pending_enrollment_repository pending_repository{app_paths};
+
+    const auto trusted_agent_result = security_materials.initialize_local_trusted_agent(
+        QStringLiteral("trusted-box"),
+        47123);
+    QVERIFY2(trusted_agent_result.success, qPrintable(trusted_agent_result.error_message));
+
+    const auto enrollment = security_materials.prepare_enrollment_request(QStringLiteral("joining-box"));
+    QVERIFY2(enrollment.success, qPrintable(enrollment.error_message));
+
+    pending_repository.save_request({
+        .request_id = QStringLiteral("request-1"),
+        .peer_id = enrollment.peer_id,
+        .name = QStringLiteral("joining-box"),
+        .verification_code = enrollment.verification_code,
+        .certificate_request = enrollment.request.certificateRequest(),
+        .x25519_public_key = enrollment.request.x25519PublicKey(),
+        .created_time_ms = 12345,
+    });
+    pending_repository.save_decision(QStringLiteral("request-1"), true, QStringLiteral("Approved"));
+
+    QVERIFY(QFile::exists(app_paths.ca_key_path()));
+    QVERIFY(QFile::exists(app_paths.server_certificate_path()));
+    QVERIFY(QFile::exists(app_paths.peer_key_path()));
+    QVERIFY(QFile::exists(app_paths.peer_list_path()));
+    QCOMPARE(pending_repository.load_requests().size(), 1);
+
+    const auto reset_result = security_materials.reset_local_agent_state();
+    QVERIFY2(reset_result.success, qPrintable(reset_result.error_message));
+
+    QVERIFY(!QFile::exists(app_paths.ca_key_path()));
+    QVERIFY(!QFile::exists(app_paths.ca_certificate_path()));
+    QVERIFY(!QFile::exists(app_paths.server_key_path()));
+    QVERIFY(!QFile::exists(app_paths.server_certificate_path()));
+    QVERIFY(!QFile::exists(app_paths.pinned_trusted_agent_ca_certificate_path()));
+    QVERIFY(!QFile::exists(app_paths.peer_key_path()));
+    QVERIFY(!QFile::exists(app_paths.peer_certificate_path()));
+    QVERIFY(!QFile::exists(app_paths.peer_certificate_der_path()));
+    QVERIFY(!QFile::exists(app_paths.peer_csr_der_path()));
+    QVERIFY(!QFile::exists(app_paths.x25519_private_key_path()));
+    QVERIFY(!QFile::exists(app_paths.peer_list_path()));
+    QVERIFY(!QFile::exists(app_paths.address_hints_path()));
+    QVERIFY(!QFile::exists(app_paths.peer_status_path()));
+    QCOMPARE(pending_repository.load_requests().size(), 0);
+    QVERIFY(QDir{app_paths.pending_enrollments_dir()}.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty());
+}
+
 void sharedcore_tests::security_materials_remove_peer_from_signed_list()
 {
     QTemporaryDir temporary_dir{};
@@ -444,6 +504,75 @@ void sharedcore_tests::security_materials_remove_peer_from_signed_list()
         decision.peerList().peers().last().certificateFingerprintSha256(),
         known_peer_error));
     QCOMPARE(known_peer_error, QStringLiteral("Peer is not present in the signed peer list"));
+}
+
+void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
+{
+    QTemporaryDir sender_dir{};
+    QVERIFY(sender_dir.isValid());
+    QTemporaryDir recipient_dir{};
+    QVERIFY(recipient_dir.isValid());
+
+    QByteArray sender_public_key{};
+    QByteArray recipient_public_key{};
+    QByteArray wrapped_payload_key{};
+    QByteArray payload_key{};
+
+    {
+        environment_guard guard{recipient_dir};
+        shared::desktop::core::app_paths app_paths{};
+        QVERIFY(app_paths.ensure_directories());
+
+        shared::desktop::core::security_materials security_materials{app_paths};
+        const auto enrollment = security_materials.prepare_enrollment_request(QStringLiteral("recipient-box"));
+        QVERIFY2(enrollment.success, qPrintable(enrollment.error_message));
+        recipient_public_key = enrollment.request.x25519PublicKey();
+        QCOMPARE(recipient_public_key.size(), 32);
+    }
+
+    {
+        environment_guard guard{sender_dir};
+        shared::desktop::core::app_paths app_paths{};
+        QVERIFY(app_paths.ensure_directories());
+
+        shared::desktop::core::security_materials security_materials{app_paths};
+        const auto enrollment = security_materials.prepare_enrollment_request(QStringLiteral("sender-box"));
+        QVERIFY2(enrollment.success, qPrintable(enrollment.error_message));
+        sender_public_key = enrollment.request.x25519PublicKey();
+        QCOMPARE(sender_public_key.size(), 32);
+
+        QString random_error{};
+        payload_key = shared::desktop::core::transfer_crypto::random_bytes(
+            shared::desktop::core::transfer_crypto::payload_key_size,
+            random_error);
+        QVERIFY2(random_error.isEmpty(), qPrintable(random_error));
+        QCOMPARE(payload_key.size(), shared::desktop::core::transfer_crypto::payload_key_size);
+
+        QString wrap_error{};
+        wrapped_payload_key = shared::desktop::core::transfer_crypto::wrap_payload_key_for_recipient(
+            app_paths,
+            recipient_public_key,
+            payload_key,
+            wrap_error);
+        QVERIFY2(wrap_error.isEmpty(), qPrintable(wrap_error));
+        QVERIFY(!wrapped_payload_key.isEmpty());
+    }
+
+    {
+        environment_guard guard{recipient_dir};
+        shared::desktop::core::app_paths app_paths{};
+        QVERIFY(app_paths.ensure_directories());
+
+        QString unwrap_error{};
+        const auto unwrapped_payload_key =
+            shared::desktop::core::transfer_crypto::unwrap_payload_key_from_sender(
+                app_paths,
+                sender_public_key,
+                wrapped_payload_key,
+                unwrap_error);
+        QVERIFY2(unwrap_error.isEmpty(), qPrintable(unwrap_error));
+        QCOMPARE(unwrapped_payload_key, payload_key);
+    }
 }
 
 }

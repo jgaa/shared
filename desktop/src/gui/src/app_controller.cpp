@@ -598,6 +598,48 @@ void app_controller::reload_state()
     emit state_changed();
 }
 
+bool app_controller::reinitialize_local_agent()
+{
+    set_last_error({});
+    if (join_in_progress_) {
+        set_last_error(QStringLiteral("Enrollment is already in progress"));
+        return false;
+    }
+
+    qCInfo(shared_gui_app_controller_log) << "Reinitialize local agent requested";
+
+    try {
+        const auto reset_result = security_materials_.reset_local_agent_state();
+        if (!reset_result.success) {
+            qCCritical(shared_gui_app_controller_log) << "Failed to clear local agent state" << reset_result.error_message;
+            set_last_error(reset_result.error_message);
+            return false;
+        }
+
+        pending_join_enrollment_.reset();
+        pending_join_name_.clear();
+        pending_join_verification_code_.clear();
+        clear_pending_clipboard_approval();
+        clear_pending_file_approval();
+
+        core::agent_configuration configuration{};
+        configuration.enrollment_host = configuration_.enrollment_host;
+        configuration.enrollment_port = configuration_.enrollment_port;
+        configuration.peer_host = configuration_.peer_host;
+        configuration.peer_port = configuration_.peer_port;
+        configuration_repository_.save(configuration);
+
+        reload_state();
+        emit configuration_changed();
+        emit state_changed();
+        return true;
+    } catch (const std::exception &exception) {
+        qCCritical(shared_gui_app_controller_log) << "Reinitialize local agent threw" << exception.what();
+        set_last_error(QString::fromUtf8(exception.what()));
+        return false;
+    }
+}
+
 bool app_controller::initialize_local_trusted_agent(const QString &name, int enrollment_port)
 {
     set_last_error({});

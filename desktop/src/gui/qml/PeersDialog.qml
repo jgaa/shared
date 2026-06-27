@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 Dialog {
     id: root
+    required property var app_controller
 
     property string pendingRemovalPeerId: ""
     property string pendingRemovalPeerName: ""

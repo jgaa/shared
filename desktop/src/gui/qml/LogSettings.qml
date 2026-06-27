@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 ScrollView {
     id: root
+    required property var app_controller
 
     anchors.fill: parent
     clip: true

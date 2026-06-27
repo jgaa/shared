@@ -1,64 +1,113 @@
 # spec/ANDROID.md
 
-Implementation language:
+Implementation language target:
 
-Kotlin
-
-Jetpack Compose
+* Kotlin
+* Jetpack Compose
 
 ## Role
 
 Android is a normal peer.
 
-Android is never a trusted agent.
+Android is never the trusted agent in the current design.
 
-Android does not own the certificate authority.
+Android must follow `PROTOCOL.md` exactly, including current implementation quirks.
 
-Android follows PROTOCOL.md exactly.
+## Enrollment and Identity
 
-## Storage
+Android should:
 
-Received files are stored in application private storage.
+* generate its own peer UUIDv7
+* generate its own P-256 TLS keypair and CSR
+* generate its own static X25519 keypair
+* send `PLATFORM_ANDROID` in enrollment and peer-info messages
 
-Files may be shared to other applications using Android share intents.
+Compatibility note:
 
-Long-lived private key material and pinned trusted agent verification credentials should use Android secure storage when practical.
-
-## Supported Intents
-
-ACTION_SEND
-
-ACTION_SEND_MULTIPLE
-
-User chooses:
-
-* one peer
-* all peers
+* the current desktop trusted agent writes `PLATFORM_LINUX` into peer-list entries for enrolled peers
+* Android must therefore treat the peer-list platform field as advisory
 
 ## Networking
 
-Connections are maintained while the application or foreground service is active.
+Android should maintain peer connections while the app or a foreground service is active.
 
-Routing behavior is identical to desktop peers.
+Routing behavior is the same as desktop:
+
+* direct peer sessions preferred
+* single-hop relay only
+* never relay already-relayed traffic
+* answer `WhoHas` positively only when the destination is directly connected
 
 Android may act as a relay.
 
-Android never relays relayed traffic.
+## Transfers
 
-## Notifications
+Android must implement both current transfer types:
 
-Transfers may generate notifications.
+* clipboard text
+* file
 
-The user may open received files from notifications.
+Clipboard compatibility requirement:
+
+* unwrap the clipboard payload key exactly like file transfer keys
+* decrypt clipboard `TransferChunk.ciphertext` with AES-256-GCM
+* expect one chunk with `chunk_index = 0` and `offset = 0`
+
+File compatibility requirement:
+
+* implement `RecipientKey` unwrap exactly as documented in `CRYPTO.md`
+* decrypt each file chunk with AES-256-GCM
+* verify final plaintext size and SHA-256 before completing the transfer
+
+Android should implement the approval flow used by desktop:
+
+* `PENDING_APPROVAL`
+* `ACCEPTED`
+* `REJECTED`
+* `COMPLETED`
+* `ERROR`
+
+Current desktop approval timeout is 3 minutes. Matching that behavior is recommended.
+
+## Storage
+
+Received files should be stored in app-controlled storage first.
+
+The app may then:
+
+* expose a share action
+* move or export files with user consent
+
+Long-lived private key material and pinned trusted-agent CA state should use Android secure storage when practical.
+
+## Sending Intents
+
+Recommended Android integrations:
+
+* `ACTION_SEND`
+* `ACTION_SEND_MULTIPLE`
+
+The user should be able to choose:
+
+* one peer
+* multiple peers by creating one transfer per selected recipient
 
 ## Clipboard
 
-Clipboard transfers are always manual.
+Clipboard transfers are manual only.
 
-No automatic synchronization exists.
+Automatic synchronization does not exist.
+
+The Android UI may treat clipboard transfers as end-to-end encrypted payload transfers.
+
+## Notifications
+
+Transfer progress and received files may surface via notifications.
+
+Opening a received file from a notification is compatible with the current desktop behavior.
 
 ## Compatibility
 
-Android must interoperate with desktop peers without requiring shared code.
+Android must interoperate with the desktop implementation without shared source code.
 
-Protocol compatibility is mandatory.
+When `PROTOCOL.md` and a more ideal design differ, follow the implemented behavior documented there.

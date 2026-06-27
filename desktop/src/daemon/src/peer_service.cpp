@@ -247,6 +247,39 @@ bool peer_service::send_clipboard_text(
 
         const auto transfer_id = QUuid::createUuidV7().toString(QUuid::WithoutBraces).toLower();
 
+        QString crypto_error{};
+        const auto payload_key = core::transfer_crypto::random_bytes(
+            core::transfer_crypto::payload_key_size,
+            crypto_error);
+        if (payload_key.isEmpty()) {
+            qCCritical(shared_peer_service_log)
+                << "Failed to create payload key for clipboard transfer"
+                << "peer_id=" << peer_id
+                << crypto_error;
+            continue;
+        }
+
+        const auto wrapped_key = payload_key_for_recipient(peer_id, payload_key, crypto_error);
+        if (wrapped_key.isEmpty()) {
+            qCCritical(shared_peer_service_log)
+                << "Failed to wrap clipboard payload key"
+                << "peer_id=" << peer_id
+                << crypto_error;
+            continue;
+        }
+
+        const auto encrypted_clipboard = core::transfer_crypto::encrypt_aes_gcm(
+            payload_key,
+            plaintext,
+            crypto_error);
+        if (encrypted_clipboard.ciphertext.isEmpty()) {
+            qCCritical(shared_peer_service_log)
+                << "Failed to encrypt clipboard payload"
+                << "peer_id=" << peer_id
+                << crypto_error;
+            continue;
+        }
+
         shared::v1::TransferId transfer_id_message{};
         transfer_id_message.setUuid(transfer_id);
 
@@ -255,6 +288,11 @@ bool peer_service::send_clipboard_text(
 
         shared::v1::PeerId recipient_peer_id{};
         recipient_peer_id.setUuid(peer_id);
+
+        shared::v1::RecipientKey recipient_key{};
+        recipient_key.setPeerId(recipient_peer_id);
+        recipient_key.setEncryptedKey(wrapped_key);
+        recipient_key.setKeyAlgorithm(QStringLiteral("x25519-hkdf-sha256"));
 
         shared::v1::TransferMetadata metadata{};
         metadata.setMimeType(QStringLiteral("text/plain; charset=utf-8"));
@@ -270,19 +308,22 @@ bool peer_service::send_clipboard_text(
         offer.setRecipientPeerIds({recipient_peer_id});
         offer.setCreatedTimeMs(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch());
         offer.setMetadata(metadata);
+        offer.setRecipientKeys({recipient_key});
 
         shared::v1::TransferChunk chunk{};
         chunk.setTransferId(transfer_id_message);
         chunk.setChunkIndex(0);
         chunk.setOffset(0);
-        chunk.setCiphertext(plaintext);
+        chunk.setCiphertext(encrypted_clipboard.ciphertext);
+        chunk.setNonce(encrypted_clipboard.nonce);
+        chunk.setAuthTag(encrypted_clipboard.auth_tag);
 
         outgoing_clipboard_transfer transfer{};
         transfer.transfer_id = transfer_id;
         transfer.recipient_peer_id = peer_id;
         transfer.recipient_name = peer_entry->identity().name();
         transfer.relay_peer_id.clear();
-        transfer.plaintext = plaintext;
+        transfer.payload_key = payload_key;
         transfer.chunk = chunk;
         outgoing_clipboard_transfers_.insert(transfer_id, transfer);
 
@@ -2143,6 +2184,17 @@ void peer_service::handle_clipboard_transfer_offer(
         return;
     }
 
+    if (transfer_offer.recipientKeys().size() != 1) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("Clipboard transfer has invalid recipient key count"));
+        return;
+    }
+
     const auto sender_entry = peer_entry_for_id(sender_peer_id);
     if (!sender_entry.has_value()) {
         [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
@@ -2155,11 +2207,29 @@ void peer_service::handle_clipboard_transfer_offer(
         return;
     }
 
+    QString crypto_error{};
+    const auto payload_key = core::transfer_crypto::unwrap_payload_key_from_sender(
+        app_paths_,
+        sender_entry->x25519PublicKey(),
+        transfer_offer.recipientKeys().constFirst().encryptedKey(),
+        crypto_error);
+    if (payload_key.isEmpty()) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
+            crypto_error);
+        return;
+    }
+
     incoming_clipboard_transfer transfer{};
     transfer.transfer_id = transfer_id;
     transfer.sender_peer_id = sender_peer_id;
     transfer.sender_name = sender_entry->identity().name();
     transfer.relay_peer_id = relay_peer_id;
+    transfer.payload_key = payload_key;
     transfer.expected_sha256 = transfer_offer.metadata().sha256().toLatin1();
     transfer.expected_size = size;
     incoming_clipboard_transfers_.insert(transfer_id, transfer);
@@ -2424,7 +2494,8 @@ void peer_service::handle_clipboard_transfer_chunk(
         << "transfer_id=" << transfer_id
         << "sender_peer_id=" << transfer_it->sender_peer_id
         << "chunk_index=" << transfer_chunk.chunkIndex()
-        << "bytes=" << transfer_chunk.ciphertext().size();
+        << "bytes=" << transfer_chunk.ciphertext().size()
+        << "encrypted=" << (!transfer_chunk.nonce().isEmpty() || !transfer_chunk.authTag().isEmpty());
 
     if (!transfer_it->approved) {
         [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
@@ -2438,8 +2509,28 @@ void peer_service::handle_clipboard_transfer_chunk(
         return;
     }
 
-    const auto plaintext = transfer_chunk.ciphertext();
-    if (static_cast<quint64>(plaintext.size()) != transfer_it->expected_size
+    QString decrypt_error{};
+    const auto plaintext = core::transfer_crypto::decrypt_aes_gcm(
+        transfer_it->payload_key,
+        {.ciphertext = transfer_chunk.ciphertext(),
+         .nonce = transfer_chunk.nonce(),
+         .auth_tag = transfer_chunk.authTag()},
+        decrypt_error);
+    if (plaintext.isEmpty()) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            transfer_it->sender_peer_id,
+            transfer_it->relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
+            decrypt_error);
+        clear_incoming_transfer(transfer_id);
+        return;
+    }
+
+    if (transfer_chunk.chunkIndex() != 0
+        || transfer_chunk.offset() != 0
+        || static_cast<quint64>(plaintext.size()) != transfer_it->expected_size
         || core::transfer_crypto::sha256_hex(plaintext) != transfer_it->expected_sha256) {
         [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
             transfer_it->sender_peer_id,
