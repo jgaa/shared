@@ -51,6 +51,7 @@ class app_controller final : public QObject {
     Q_PROPERTY(bool copy_targets_available READ copy_targets_available NOTIFY peers_changed)
     Q_PROPERTY(QString last_error READ last_error NOTIFY state_changed)
     Q_PROPERTY(QVariantList pending_requests READ pending_requests NOTIFY state_changed)
+    Q_PROPERTY(bool local_socket_enabled READ local_socket_enabled WRITE set_local_socket_enabled NOTIFY transfer_settings_changed)
     Q_PROPERTY(int clipboard_limit_megabytes READ clipboard_limit_megabytes WRITE set_clipboard_limit_megabytes NOTIFY clipboard_limit_megabytes_changed)
     Q_PROPERTY(bool auto_accept_clipboard READ auto_accept_clipboard WRITE set_auto_accept_clipboard NOTIFY transfer_settings_changed)
     Q_PROPERTY(bool auto_accept_files READ auto_accept_files WRITE set_auto_accept_files NOTIFY transfer_settings_changed)
@@ -103,6 +104,7 @@ public:
     [[nodiscard]] bool copy_targets_available() const;
     [[nodiscard]] QString last_error() const;
     [[nodiscard]] QVariantList pending_requests() const;
+    [[nodiscard]] bool local_socket_enabled() const;
     [[nodiscard]] int clipboard_limit_megabytes() const;
     [[nodiscard]] bool auto_accept_clipboard() const;
     [[nodiscard]] bool auto_accept_files() const;
@@ -131,6 +133,7 @@ public:
     void set_auto_accept_clipboard(bool value);
     void set_auto_accept_files(bool value);
     void set_download_path(const QString &value);
+    void set_local_socket_enabled(bool value);
     void set_local_enrollment_host(const QString &value);
     void set_local_enrollment_port(int value);
     void set_local_peer_host(const QString &value);
@@ -159,12 +162,14 @@ public:
         const QString &fingerprint);
     Q_INVOKABLE void approve_pending_request(const QString &request_id);
     Q_INVOKABLE void reject_pending_request(const QString &request_id);
+    Q_INVOKABLE void remove_pending_request(const QString &request_id);
     Q_INVOKABLE bool send_clipboard_to_all();
     Q_INVOKABLE bool send_clipboard_to_peer(const QString &peer_id);
     Q_INVOKABLE QStringList select_files();
     Q_INVOKABLE bool send_files_to_all(const QStringList &file_paths);
     Q_INVOKABLE bool send_files_to_peer(const QString &peer_id, const QStringList &file_paths);
     Q_INVOKABLE bool remove_authorized_peer(const QString &peer_id);
+    Q_INVOKABLE void copy_to_clipboard(const QString &text);
     Q_INVOKABLE bool approve_clipboard_transfer();
     Q_INVOKABLE bool reject_clipboard_transfer();
     Q_INVOKABLE bool approve_file_transfer();

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 project(shared_desktop VERSION 0.1.0 LANGUAGES CXX)
 
 option(SHARED_BUILD_GUI "Build the Qt/QML desktop UI" ON)
-option(SHARED_BUILD_HEADLESS "Build the headless service frontend" ON)
+option(SHARED_BUILD_HEADLESS "Build the headless service frontend" OFF)
 option(SHARED_FLATPAK_BUILD "Build shared_desktop for Flatpak packaging" OFF)
 
 set(CMAKE_CXX_STANDARD 20)

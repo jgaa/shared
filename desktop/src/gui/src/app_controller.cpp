@@ -317,6 +317,11 @@ QVariantList app_controller::pending_requests() const
     return requests;
 }
 
+bool app_controller::local_socket_enabled() const
+{
+    return settings_repository_.local_socket_enabled();
+}
+
 int app_controller::clipboard_limit_megabytes() const
 {
     return clipboard_limit_megabytes_;
@@ -500,6 +505,15 @@ void app_controller::set_download_path(const QString &value)
         return;
     }
     settings_repository_.set_download_path(value);
+    emit transfer_settings_changed();
+}
+
+void app_controller::set_local_socket_enabled(bool value)
+{
+    if (settings_repository_.local_socket_enabled() == value) {
+        return;
+    }
+    settings_repository_.set_local_socket_enabled(value);
     emit transfer_settings_changed();
 }
 
@@ -902,6 +916,18 @@ void app_controller::reject_pending_request(const QString &request_id)
     }
 }
 
+void app_controller::remove_pending_request(const QString &request_id)
+{
+    try {
+        pending_enrollment_repository_.remove_request(request_id);
+        qCInfo(shared_gui_app_controller_log) << "Removed pending enrollment request" << request_id;
+        emit state_changed();
+    } catch (const std::exception &exception) {
+        qCCritical(shared_gui_app_controller_log) << "Failed to remove pending request" << request_id << exception.what();
+        set_last_error(QString::fromUtf8(exception.what()));
+    }
+}
+
 bool app_controller::send_clipboard_to_all()
 {
     if (service_ == nullptr) {
@@ -1056,6 +1082,11 @@ bool app_controller::remove_authorized_peer(const QString &peer_id)
         set_last_error(QString::fromUtf8(exception.what()));
         return false;
     }
+}
+
+void app_controller::copy_to_clipboard(const QString &text)
+{
+    QGuiApplication::clipboard()->setText(text);
 }
 
 bool app_controller::approve_clipboard_transfer()

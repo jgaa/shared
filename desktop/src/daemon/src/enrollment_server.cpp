@@ -82,6 +82,12 @@ enrollment_server::enrollment_server(
 
 bool enrollment_server::start(QString &error_message)
 {
+    const auto stale_requests = pending_enrollment_repository_.load_requests();
+    if (!stale_requests.isEmpty()) {
+        pending_enrollment_repository_.remove_all_requests();
+        qCInfo(shared_enrollment_server_log) << "Cleared stale pending enrollment requests on startup" << stale_requests.size();
+    }
+
     const auto certificate_bytes = security_materials_.current_server_certificate_pem(error_message);
     if (certificate_bytes.isEmpty()) {
         if (error_message.isEmpty()) {
@@ -266,7 +272,14 @@ void enrollment_server::maybe_finish_request(QSslSocket *socket)
         return;
     }
 
+    const auto request = pending_enrollment_repository_.load_request(session->request_id);
     const auto decision = pending_enrollment_repository_.load_decision(session->request_id);
+    if (!request.has_value() && !decision.has_value()) {
+        qCInfo(shared_enrollment_server_log) << "Pending enrollment request was removed before a decision was sent" << session->request_id;
+        write_decision_and_disconnect(socket, make_error_decision(QStringLiteral("Enrollment request removed by trusted agent")));
+        return;
+    }
+
     if (!decision.has_value() || !decision->decided) {
         return;
     }
@@ -275,7 +288,6 @@ void enrollment_server::maybe_finish_request(QSslSocket *socket)
         shared::v1::EnrollmentDecision response{};
         if (decision->approved) {
             QString error_message{};
-            const auto request = pending_enrollment_repository_.load_request(session->request_id);
             if (!request.has_value()) {
                 response = make_logged_error_decision(QStringLiteral("Pending request disappeared before approval"));
             } else {
@@ -308,6 +320,12 @@ void enrollment_server::maybe_finish_request(QSslSocket *socket)
 
 void enrollment_server::close_socket(QSslSocket *socket)
 {
+    const auto session = sessions_.find(socket);
+    if (session != sessions_.end() && !session->request_id.isEmpty()) {
+        pending_enrollment_repository_.remove_request(session->request_id);
+        qCInfo(shared_enrollment_server_log) << "Removed pending enrollment request while closing socket" << session->request_id;
+    }
+
     qCInfo(shared_enrollment_server_log)
         << "Closing enrollment socket"
         << socket->peerAddress().toString()

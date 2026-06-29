@@ -22,6 +22,7 @@ public:
 
     [[nodiscard]] std::optional<pending_enrollment_decision> load_decision(const QString &request_id) const;
     void remove_request(const QString &request_id) const;
+    void remove_all_requests() const;
 
 private:
     [[nodiscard]] QString request_path(const QString &request_id) const;

@@ -24,7 +24,9 @@ bool daemon_application::start()
     qCInfo(shared_daemon_log) << "config dir:" << app_paths_.config_dir();
     qCInfo(shared_daemon_log) << "data dir:" << app_paths_.data_dir();
     qCInfo(shared_daemon_log) << "cache dir:" << app_paths_.cache_dir();
-    qCInfo(shared_daemon_log) << "socket path:" << app_paths_.socket_path();
+    if (settings_repository_.local_socket_enabled()) {
+        qCInfo(shared_daemon_log) << "local socket enabled for future CLI support at:" << app_paths_.socket_path();
+    }
     qCInfo(shared_daemon_log) << "clipboard limit bytes:" << settings_repository_.clipboard_limit_bytes();
 
     reload_configuration();

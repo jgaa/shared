@@ -20,6 +20,7 @@ Dialog {
         trusted_agent_host.text = app_controller.trusted_agent_host
         trusted_agent_port.value = app_controller.trusted_agent_port
         trusted_agent_peer_port.value = app_controller.trusted_agent_peer_port
+        local_socket_enabled.checked = app_controller.local_socket_enabled
         clipboard_limit.value = app_controller.clipboard_limit_megabytes
         auto_accept_clipboard.checked = app_controller.auto_accept_clipboard
         auto_accept_files.checked = app_controller.auto_accept_files
@@ -120,6 +121,23 @@ Dialog {
                                 to: 65535
                                 editable: true
                                 onValueModified: app_controller.local_peer_port = value
+                            }
+                        }
+                    }
+
+                    Frame {
+                        Layout.fillWidth: true
+
+                        GridLayout {
+                            anchors.fill: parent
+                            columns: 2
+                            columnSpacing: 16
+                            rowSpacing: 10
+
+                            Label { text: "Enable local socket" }
+                            CheckBox {
+                                id: local_socket_enabled
+                                onToggled: app_controller.local_socket_enabled = checked
                             }
                         }
                     }

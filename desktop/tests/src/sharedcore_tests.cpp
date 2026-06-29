@@ -250,6 +250,21 @@ void sharedcore_tests::pending_enrollment_repository_round_trip()
     repository.remove_request(QStringLiteral("request-1"));
     QVERIFY(!repository.load_request(QStringLiteral("request-1")).has_value());
     QVERIFY(!repository.load_decision(QStringLiteral("request-1")).has_value());
+
+    shared::desktop::core::pending_enrollment_request stale_request{};
+    stale_request.request_id = QStringLiteral("request-2");
+    stale_request.peer_id = QStringLiteral("peer-2");
+    stale_request.name = QStringLiteral("stale");
+    stale_request.verification_code = QStringLiteral("deadbeef");
+    stale_request.certificate_request = QByteArrayLiteral("csr-2");
+    stale_request.x25519_public_key = QByteArray(32, '\x22');
+    stale_request.created_time_ms = 67890;
+
+    repository.save_request(stale_request);
+    repository.save_decision(QStringLiteral("request-2"), false, QStringLiteral("stale"));
+    repository.remove_all_requests();
+    QVERIFY(repository.load_requests().isEmpty());
+    QVERIFY(!repository.load_decision(QStringLiteral("request-2")).has_value());
 }
 
 void sharedcore_tests::address_hint_repository_round_trip()

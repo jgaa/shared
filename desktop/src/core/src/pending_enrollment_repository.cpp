@@ -158,6 +158,13 @@ void pending_enrollment_repository::remove_request(const QString &request_id) co
     QFile::remove(decision_path(request_id));
 }
 
+void pending_enrollment_repository::remove_all_requests() const
+{
+    for (const auto &request : load_requests()) {
+        remove_request(request.request_id);
+    }
+}
+
 QString pending_enrollment_repository::request_path(const QString &request_id) const
 {
     return app_paths_.pending_enrollments_dir() + QStringLiteral("/") + request_id + QStringLiteral(".request.json");
