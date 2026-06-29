@@ -19,11 +19,24 @@ modules:
       - |
         app_version="$(sed -nE 's/^project\(shared_desktop VERSION ([^ ]+) LANGUAGES CXX\)$/\1/p' desktop/CMakeLists.txt)"
         test -n "${app_version}"
+        cat > /tmp/check-kf6wallet.cmake <<'EOF'
+        find_package(KF6Wallet QUIET CONFIG)
+        if(NOT KF6Wallet_FOUND)
+          message(FATAL_ERROR "KF6Wallet not found")
+        endif()
+        EOF
+        if cmake -P /tmp/check-kf6wallet.cmake >/dev/null 2>&1; then
+          kwallet_arg='-DSAFEKEEPING_ENABLE_KWALLET=ON'
+        else
+          kwallet_arg='-DSAFEKEEPING_ENABLE_KWALLET=OFF'
+        fi
         cmake -S desktop -B _build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=/app \
           -DCMAKE_PREFIX_PATH=/app \
           -DBUILD_TESTING=OFF \
+          -DFETCHCONTENT_SOURCE_DIR_SAFEKEEPING="$(pwd)/third_party/safekeeping" \
+          "${kwallet_arg}" \
           -DSHARED_BUILD_HEADLESS=OFF \
           -DSHARED_FLATPAK_BUILD=ON \
           -DSHARED_QCORO_SOURCE_DIR="$(pwd)/third_party/qcoro" \
@@ -48,3 +61,7 @@ modules:
         url: https://github.com/jgaa/logfault.git
         tag: v0.8.5
         dest: third_party/logfault
+      - type: git
+        url: https://github.com/jgaa/SafeKeeping.git
+        commit: 635466b1f3508265a13b35489f58849332fde0c1
+        dest: third_party/safekeeping
