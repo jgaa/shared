@@ -88,6 +88,12 @@ ApplicationWindow {
                 onTriggered: reinitialize_dialog.open()
             }
 
+            Action {
+                text: "Decommission..."
+                enabled: !app_controller.join_in_progress
+                onTriggered: decommission_dialog.open()
+            }
+
             MenuSeparator {
             }
 
@@ -561,6 +567,37 @@ ApplicationWindow {
             width: 420
             wrapMode: Text.WordWrap
             text: "Clear this machine's current trusted-agent or peer enrollment and return to first-run setup? Reinitialize the new trusted agent first, then reinitialize every other agent before joining them to it."
+        }
+    }
+
+    Dialog {
+        id: decommission_dialog
+
+        title: "Decommission"
+        modal: true
+        standardButtons: Dialog.Yes | Dialog.Cancel
+
+        anchors.centerIn: parent
+        width: Math.min(window.width * 0.75, 520)
+
+        onAccepted: app_controller.decommission()
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            Label {
+                text: "This will permanently remove the local vault, delete the configuration/settings file, and quit Shared."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            Label {
+                text: "This action cannot be undone."
+                font.bold: true
+                color: "#7a130b"
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
         }
     }
 

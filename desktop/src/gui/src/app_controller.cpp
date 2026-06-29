@@ -11,6 +11,7 @@
 #include <QtGui/QGuiApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QFile>
+#include <QtCore/QFileInfo>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
@@ -98,6 +99,25 @@ QStringList normalized_local_file_paths(const QStringList &paths)
     }
 
     return normalized;
+}
+
+bool remove_settings_store_file(const QString &path, QString &error_message)
+{
+    if (path.isEmpty()) {
+        return true;
+    }
+
+    const QFileInfo info{path};
+    if (!info.exists()) {
+        return true;
+    }
+
+    if (!QFile::remove(path)) {
+        error_message = QStringLiteral("Failed to remove settings file %1").arg(path);
+        return false;
+    }
+
+    return true;
 }
 
 }
@@ -635,6 +655,65 @@ bool app_controller::reinitialize_local_agent()
         return true;
     } catch (const std::exception &exception) {
         qCCritical(shared_gui_app_controller_log) << "Reinitialize local agent threw" << exception.what();
+        set_last_error(QString::fromUtf8(exception.what()));
+        return false;
+    }
+}
+
+bool app_controller::decommission()
+{
+    set_last_error({});
+    if (join_in_progress_) {
+        set_last_error(QStringLiteral("Enrollment is already in progress"));
+        return false;
+    }
+
+    qCInfo(shared_gui_app_controller_log) << "Decommission requested";
+
+    try {
+        const auto reset_result = security_materials_.reset_local_agent_state();
+        if (!reset_result.success) {
+            qCCritical(shared_gui_app_controller_log) << "Failed to clear local agent state" << reset_result.error_message;
+            set_last_error(reset_result.error_message);
+            return false;
+        }
+
+        const auto configuration_store_path =
+            QFileInfo(QSettings{
+                core::app_metadata::organization_name,
+                core::app_metadata::organization_name}.fileName()).absoluteFilePath();
+        const auto gui_settings_store_path = logging_controller_.settings_file_path();
+
+        QString file_error{};
+        if (!remove_settings_store_file(configuration_store_path, file_error)
+            || (!gui_settings_store_path.isEmpty()
+                && gui_settings_store_path != configuration_store_path
+                && !remove_settings_store_file(gui_settings_store_path, file_error))) {
+            qCCritical(shared_gui_app_controller_log) << file_error;
+            set_last_error(file_error);
+            return false;
+        }
+
+        pending_join_enrollment_.reset();
+        pending_join_name_.clear();
+        pending_join_verification_code_.clear();
+        clear_pending_clipboard_approval();
+        clear_pending_file_approval();
+        configuration_ = {};
+        trusted_agent_fingerprint_.clear();
+        verified_peers_.clear();
+        log_lines_.clear();
+        emit peers_changed();
+        emit log_lines_changed();
+        emit configuration_changed();
+        emit state_changed();
+
+        QTimer::singleShot(0, qApp, []() {
+            QCoreApplication::quit();
+        });
+        return true;
+    } catch (const std::exception &exception) {
+        qCCritical(shared_gui_app_controller_log) << "Decommission threw" << exception.what();
         set_last_error(QString::fromUtf8(exception.what()));
         return false;
     }

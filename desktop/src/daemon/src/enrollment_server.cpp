@@ -82,19 +82,28 @@ enrollment_server::enrollment_server(
 
 bool enrollment_server::start(QString &error_message)
 {
-    QFile certificate_file{app_paths_.server_certificate_path()};
-    QFile key_file{app_paths_.server_key_path()};
-    if (!certificate_file.open(QIODevice::ReadOnly) || !key_file.open(QIODevice::ReadOnly)) {
-        error_message = QStringLiteral("Failed to open trusted-agent TLS materials");
-        qCCritical(shared_enrollment_server_log) << error_message
-            << certificate_file.errorString() << key_file.errorString();
+    const auto certificate_bytes = security_materials_.current_server_certificate_pem(error_message);
+    if (certificate_bytes.isEmpty()) {
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to load trusted-agent TLS certificate");
+        }
+        qCCritical(shared_enrollment_server_log) << error_message;
+        return false;
+    }
+
+    const auto key_bytes = security_materials_.current_server_private_key_pem(error_message);
+    if (key_bytes.isEmpty()) {
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to load trusted-agent TLS private key");
+        }
+        qCCritical(shared_enrollment_server_log) << error_message;
         return false;
     }
 
     QSslConfiguration ssl_configuration = QSslConfiguration::defaultConfiguration();
-    ssl_configuration.setLocalCertificate(QSslCertificate{certificate_file.readAll(), QSsl::Pem});
+    ssl_configuration.setLocalCertificate(QSslCertificate{certificate_bytes, QSsl::Pem});
     ssl_configuration.setPrivateKey(QSslKey(
-        key_file.readAll(),
+        key_bytes,
         QSsl::Ec,
         QSsl::Pem,
         QSsl::PrivateKey));

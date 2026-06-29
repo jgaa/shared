@@ -16,6 +16,8 @@ export XDG_CACHE_HOME=/tmp/shared-a-cache
 export XDG_RUNTIME_DIR=/tmp/shared-a-run
 export SHARED_PEERSERVICE_IP=127.0.0.1
 export SHARED_PEERSERVICE_PORT=47124
+export SHARED_SAFEKEEPING_NAMESPACE=shared-test-a
+export SHARED_SAFEKEEPING_TESTING=1
 rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" /tmp/shared-a-gui.log
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
@@ -31,6 +33,8 @@ export XDG_CACHE_HOME=/tmp/shared-b-cache
 export XDG_RUNTIME_DIR=/tmp/shared-b-run
 export SHARED_PEERSERVICE_IP=127.0.0.1
 export SHARED_PEERSERVICE_PORT=47125
+export SHARED_SAFEKEEPING_NAMESPACE=shared-test-b
+export SHARED_SAFEKEEPING_TESTING=1
 rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR" /tmp/shared-b-gui.log
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
@@ -90,3 +94,10 @@ Failure checks:
 2. If no port is listening, confirm `/tmp/shared-a-gui.log` contains the enrollment server startup line and the peer service startup line.
 3. If Qt reports Wayland plugin failures, rerun with `QT_QPA_PLATFORM=xcb`.
 4. If `XDG_RUNTIME_DIR` permission warnings appear, run `chmod 700` on the runtime directory before starting the program.
+
+Vault test knobs:
+
+1. `SHARED_SAFEKEEPING_NAMESPACE` optionally overrides the SafeKeeping namespace.
+   Use a different value per concurrently running test instance under the same OS login.
+2. `SHARED_SAFEKEEPING_TESTING=1` tells Shared this is a disposable test run.
+   When present, Shared removes the selected vault namespace once on process startup and again on process exit.

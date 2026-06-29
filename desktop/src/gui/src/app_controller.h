@@ -145,6 +145,7 @@ public:
 
     Q_INVOKABLE void reload_state();
     Q_INVOKABLE bool reinitialize_local_agent();
+    Q_INVOKABLE bool decommission();
     Q_INVOKABLE bool initialize_local_trusted_agent(const QString &name, int enrollment_port);
     Q_INVOKABLE bool join_trusted_agent(
         const QString &name,

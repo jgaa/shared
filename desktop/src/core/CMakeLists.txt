@@ -57,6 +57,7 @@ target_link_libraries(sharedcore PUBLIC
     Qt6::Protobuf
     sharedproto
     logfault::logfault
+    safekeeping
     OpenSSL::Crypto
     OpenSSL::SSL
 )

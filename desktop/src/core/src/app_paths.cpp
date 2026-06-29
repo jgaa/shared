@@ -57,12 +57,12 @@ QString app_paths::socket_path() const
 
 QString app_paths::credentials_dir() const
 {
-    return clean_path(data_dir() + QStringLiteral("/credentials"));
+    return clean_path(runtime_dir() + QStringLiteral("/credentials"));
 }
 
 QString app_paths::trusted_agent_dir() const
 {
-    return clean_path(data_dir() + QStringLiteral("/trusted-agent"));
+    return clean_path(runtime_dir() + QStringLiteral("/trusted-agent"));
 }
 
 QString app_paths::pending_enrollments_dir() const
@@ -72,7 +72,7 @@ QString app_paths::pending_enrollments_dir() const
 
 QString app_paths::peer_list_path() const
 {
-    return clean_path(data_dir() + QStringLiteral("/peer-list.bin"));
+    return clean_path(runtime_dir() + QStringLiteral("/peer-list.bin"));
 }
 
 QString app_paths::address_hints_path() const

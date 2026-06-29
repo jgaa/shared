@@ -49,26 +49,6 @@ QString build_numbered_filename(const QString &base_name, const QString &suffix,
         : QStringLiteral("%1 (%2).%3").arg(base_name).arg(index).arg(suffix);
 }
 
-QList<QSslCertificate> load_certificates(const QString &path, QSsl::EncodingFormat format)
-{
-    QFile file{path};
-    if (!file.open(QIODevice::ReadOnly)) {
-        return {};
-    }
-
-    return QSslCertificate::fromData(file.readAll(), format);
-}
-
-QByteArray read_file_bytes(const QString &path)
-{
-    QFile file{path};
-    if (!file.open(QIODevice::ReadOnly)) {
-        return {};
-    }
-
-    return file.readAll();
-}
-
 QString socket_address(const QSslSocket &socket)
 {
     return socket.peerAddress().toString();
@@ -934,17 +914,19 @@ void peer_service::flush_reachability_broadcast()
 
 bool peer_service::configure_server(QString &error_message)
 {
-    const auto local_certificates = load_certificates(app_paths_.peer_certificate_path(), QSsl::Pem);
+    const auto local_certificates = QSslCertificate::fromData(
+        security_materials_.current_peer_certificate_pem(error_message),
+        QSsl::Pem);
     if (local_certificates.isEmpty()) {
         error_message = QStringLiteral("Failed to load local peer certificate");
-        qCCritical(shared_peer_service_log) << error_message << app_paths_.peer_certificate_path();
+        qCCritical(shared_peer_service_log) << error_message;
         return false;
     }
 
-    const auto key_bytes = read_file_bytes(app_paths_.peer_key_path());
+    const auto key_bytes = security_materials_.current_peer_private_key_pem(error_message);
     if (key_bytes.isEmpty()) {
         error_message = QStringLiteral("Failed to load local peer private key");
-        qCCritical(shared_peer_service_log) << error_message << app_paths_.peer_key_path();
+        qCCritical(shared_peer_service_log) << error_message;
         return false;
     }
 
@@ -957,9 +939,13 @@ bool peer_service::configure_server(QString &error_message)
 
     QList<QSslCertificate> ca_certificates{};
     if (configuration_.role == core::agent_role::local_trusted_agent) {
-        ca_certificates = load_certificates(app_paths_.ca_certificate_path(), QSsl::Pem);
+        ca_certificates = QSslCertificate::fromData(
+            security_materials_.current_ca_certificate_pem(error_message),
+            QSsl::Pem);
     } else {
-        ca_certificates = load_certificates(app_paths_.pinned_trusted_agent_ca_certificate_path(), QSsl::Der);
+        ca_certificates = QSslCertificate::fromData(
+            security_materials_.current_pinned_trusted_agent_ca_certificate_der(error_message),
+            QSsl::Der);
     }
     if (ca_certificates.isEmpty()) {
         error_message = QStringLiteral("Failed to load trusted-agent CA certificate for peer authentication");
@@ -993,13 +979,15 @@ bool peer_service::configure_server(QString &error_message)
 
 bool peer_service::configure_client_socket(QSslSocket &socket, QString &error_message) const
 {
-    const auto local_certificates = load_certificates(app_paths_.peer_certificate_path(), QSsl::Pem);
+    const auto local_certificates = QSslCertificate::fromData(
+        security_materials_.current_peer_certificate_pem(error_message),
+        QSsl::Pem);
     if (local_certificates.isEmpty()) {
         error_message = QStringLiteral("Failed to load local peer certificate");
         return false;
     }
 
-    const auto key_bytes = read_file_bytes(app_paths_.peer_key_path());
+    const auto key_bytes = security_materials_.current_peer_private_key_pem(error_message);
     if (key_bytes.isEmpty()) {
         error_message = QStringLiteral("Failed to load local peer private key");
         return false;
@@ -1013,9 +1001,13 @@ bool peer_service::configure_client_socket(QSslSocket &socket, QString &error_me
 
     QList<QSslCertificate> ca_certificates{};
     if (configuration_.role == core::agent_role::local_trusted_agent) {
-        ca_certificates = load_certificates(app_paths_.ca_certificate_path(), QSsl::Pem);
+        ca_certificates = QSslCertificate::fromData(
+            security_materials_.current_ca_certificate_pem(error_message),
+            QSsl::Pem);
     } else {
-        ca_certificates = load_certificates(app_paths_.pinned_trusted_agent_ca_certificate_path(), QSsl::Der);
+        ca_certificates = QSslCertificate::fromData(
+            security_materials_.current_pinned_trusted_agent_ca_certificate_der(error_message),
+            QSsl::Der);
     }
     if (ca_certificates.isEmpty()) {
         error_message = QStringLiteral("Failed to load trusted-agent CA certificate");
@@ -2208,8 +2200,19 @@ void peer_service::handle_clipboard_transfer_offer(
     }
 
     QString crypto_error{};
+    const auto local_private_key_pem = security_materials_.current_x25519_private_key_pem(crypto_error);
+    if (local_private_key_pem.isEmpty()) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
+            crypto_error.isEmpty() ? QStringLiteral("Failed to load local X25519 private key") : crypto_error);
+        return;
+    }
     const auto payload_key = core::transfer_crypto::unwrap_payload_key_from_sender(
-        app_paths_,
+        local_private_key_pem,
         sender_entry->x25519PublicKey(),
         transfer_offer.recipientKeys().constFirst().encryptedKey(),
         crypto_error);
@@ -2356,8 +2359,19 @@ void peer_service::handle_file_transfer_offer(
     }
 
     QString crypto_error{};
+    const auto local_private_key_pem = security_materials_.current_x25519_private_key_pem(crypto_error);
+    if (local_private_key_pem.isEmpty()) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
+            crypto_error.isEmpty() ? QStringLiteral("Failed to load local X25519 private key") : crypto_error);
+        return;
+    }
     const auto payload_key = core::transfer_crypto::unwrap_payload_key_from_sender(
-        app_paths_,
+        local_private_key_pem,
         sender_entry->x25519PublicKey(),
         transfer_offer.recipientKeys().constFirst().encryptedKey(),
         crypto_error);
@@ -3281,8 +3295,16 @@ QByteArray peer_service::payload_key_for_recipient(
         return {};
     }
 
+    const auto local_private_key_pem = security_materials_.current_x25519_private_key_pem(error_message);
+    if (local_private_key_pem.isEmpty()) {
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to load local X25519 private key");
+        }
+        return {};
+    }
+
     return core::transfer_crypto::wrap_payload_key_for_recipient(
-        app_paths_,
+        local_private_key_pem,
         peer_entry->x25519PublicKey(),
         payload_key,
         error_message);

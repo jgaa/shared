@@ -5,8 +5,6 @@
 
 namespace shared::desktop::core {
 
-class app_paths;
-
 class transfer_crypto {
 public:
     struct encrypted_payload {
@@ -30,12 +28,12 @@ public:
         const encrypted_payload &payload,
         QString &error_message);
     [[nodiscard]] static QByteArray wrap_payload_key_for_recipient(
-        const app_paths &app_paths,
+        const QByteArray &local_private_key_pem,
         const QByteArray &recipient_public_key,
         const QByteArray &payload_key,
         QString &error_message);
     [[nodiscard]] static QByteArray unwrap_payload_key_from_sender(
-        const app_paths &app_paths,
+        const QByteArray &local_private_key_pem,
         const QByteArray &sender_public_key,
         const QByteArray &wrapped_payload_key,
         QString &error_message);

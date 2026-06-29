@@ -53,6 +53,14 @@ set(QCORO_WITH_QML OFF CACHE BOOL "Disable unused QCoro QML support" FORCE)
 set(QCORO_WITH_QTTEST OFF CACHE BOOL "Disable unused QCoro QtTest support" FORCE)
 FetchContent_MakeAvailable(qcoro)
 
+set(SAFEKEEPING_BUILD_TESTS OFF CACHE BOOL "Disable SafeKeeping tests in shared_desktop" FORCE)
+set(SAFEKEEPING_ENABLE_KWALLET ON CACHE BOOL "Enable KWallet support in shared_desktop" FORCE)
+FetchContent_Declare(safekeeping
+    GIT_REPOSITORY https://github.com/jgaa/SafeKeeping.git
+    GIT_TAG 635466b1f3508265a13b35489f58849332fde0c1
+)
+FetchContent_MakeAvailable(safekeeping)
+
 find_package(Qt6 6.10 REQUIRED COMPONENTS
     Core
     Core5Compat

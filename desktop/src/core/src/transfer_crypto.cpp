@@ -1,9 +1,6 @@
 #include "shared/desktop/core/transfer_crypto.h"
 
-#include "shared/desktop/core/app_paths.h"
-
 #include <QtCore/QCryptographicHash>
-#include <QtCore/QFile>
 #include <QtCore/QLoggingCategory>
 
 #include <openssl/evp.h>
@@ -24,21 +21,10 @@ constexpr auto wrapping_info = std::to_array<unsigned char>({
     'f', 'e', 'r', '-', 'k', 'e', 'y', '-', 'w', 'r', 'a', 'p', '-', 'v', '1'
 });
 
-QByteArray read_file_bytes(const QString &path, QString &error_message)
+EVP_PKEY *load_local_x25519_private_key(const QByteArray &pem_data, QString &error_message)
 {
-    QFile file{path};
-    if (!file.open(QIODevice::ReadOnly)) {
-        error_message = QStringLiteral("Failed to open key file %1: %2").arg(path, file.errorString());
-        return {};
-    }
-
-    return file.readAll();
-}
-
-EVP_PKEY *load_local_x25519_private_key(const QString &path, QString &error_message)
-{
-    const auto pem_data = read_file_bytes(path, error_message);
     if (pem_data.isEmpty()) {
+        error_message = QStringLiteral("Local X25519 private key is empty");
         return nullptr;
     }
 
@@ -349,12 +335,12 @@ QByteArray transfer_crypto::decrypt_aes_gcm(
 }
 
 QByteArray transfer_crypto::wrap_payload_key_for_recipient(
-    const app_paths &app_paths,
+    const QByteArray &local_private_key_pem,
     const QByteArray &recipient_public_key,
     const QByteArray &payload_key,
     QString &error_message)
 {
-    EVP_PKEY *private_key = load_local_x25519_private_key(app_paths.x25519_private_key_path(), error_message);
+    EVP_PKEY *private_key = load_local_x25519_private_key(local_private_key_pem, error_message);
     if (private_key == nullptr) {
         return {};
     }
@@ -394,7 +380,7 @@ QByteArray transfer_crypto::wrap_payload_key_for_recipient(
 }
 
 QByteArray transfer_crypto::unwrap_payload_key_from_sender(
-    const app_paths &app_paths,
+    const QByteArray &local_private_key_pem,
     const QByteArray &sender_public_key,
     const QByteArray &wrapped_payload_key,
     QString &error_message)
@@ -404,7 +390,7 @@ QByteArray transfer_crypto::unwrap_payload_key_from_sender(
         return {};
     }
 
-    EVP_PKEY *private_key = load_local_x25519_private_key(app_paths.x25519_private_key_path(), error_message);
+    EVP_PKEY *private_key = load_local_x25519_private_key(local_private_key_pem, error_message);
     if (private_key == nullptr) {
         return {};
     }

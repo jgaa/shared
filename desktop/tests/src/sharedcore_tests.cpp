@@ -19,6 +19,12 @@ namespace {
 
 Q_LOGGING_CATEGORY(sharedcore_tests_log, "shared.desktop.tests")
 
+QString safekeeping_vault_db_path()
+{
+    return QString::fromLocal8Bit(qgetenv("SAFEKEEPING_DATA_DIR"))
+        + QStringLiteral("/shared-desktop/vault.db");
+}
+
 class environment_guard {
 public:
     explicit environment_guard(QTemporaryDir &temporary_dir)
@@ -28,11 +34,20 @@ public:
         set_env("XDG_DATA_HOME", "data", previous_data_home_);
         set_env("XDG_CACHE_HOME", "cache", previous_cache_home_);
         set_env("XDG_RUNTIME_DIR", "runtime", previous_runtime_dir_);
+        set_env("SAFEKEEPING_DATA_DIR", "safekeeping-data", previous_safekeeping_data_dir_);
+        set_env("SAFEKEEPING_TEST_FAKE_VAULT_DIR", "safekeeping-fake-vault", previous_safekeeping_fake_vault_dir_);
+        previous_safekeeping_disable_system_vault_ = qgetenv("SAFEKEEPING_DISABLE_SYSTEM_VAULT");
+        qunsetenv("SAFEKEEPING_DISABLE_SYSTEM_VAULT");
 
         ensure_dir(QString::fromLocal8Bit(qgetenv("XDG_CONFIG_HOME")));
         ensure_dir(QString::fromLocal8Bit(qgetenv("XDG_DATA_HOME")));
         ensure_dir(QString::fromLocal8Bit(qgetenv("XDG_CACHE_HOME")));
         ensure_dir(QString::fromLocal8Bit(qgetenv("XDG_RUNTIME_DIR")));
+        ensure_dir(QString::fromLocal8Bit(qgetenv("SAFEKEEPING_DATA_DIR")));
+        ensure_dir(QString::fromLocal8Bit(qgetenv("SAFEKEEPING_TEST_FAKE_VAULT_DIR")));
+        QFile::setPermissions(
+            QString::fromLocal8Bit(qgetenv("XDG_RUNTIME_DIR")),
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
     }
 
     ~environment_guard()
@@ -41,6 +56,9 @@ public:
         restore_env("XDG_DATA_HOME", previous_data_home_);
         restore_env("XDG_CACHE_HOME", previous_cache_home_);
         restore_env("XDG_RUNTIME_DIR", previous_runtime_dir_);
+        restore_env("SAFEKEEPING_DATA_DIR", previous_safekeeping_data_dir_);
+        restore_env("SAFEKEEPING_TEST_FAKE_VAULT_DIR", previous_safekeeping_fake_vault_dir_);
+        restore_env("SAFEKEEPING_DISABLE_SYSTEM_VAULT", previous_safekeeping_disable_system_vault_);
     }
 
 private:
@@ -76,6 +94,9 @@ private:
     QByteArray previous_data_home_{};
     QByteArray previous_cache_home_{};
     QByteArray previous_runtime_dir_{};
+    QByteArray previous_safekeeping_data_dir_{};
+    QByteArray previous_safekeeping_fake_vault_dir_{};
+    QByteArray previous_safekeeping_disable_system_vault_{};
 };
 
 class sharedcore_tests final : public QObject {
@@ -318,11 +339,14 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     QCOMPARE(trusted_agent_result.enrollment_fingerprint.size(), 9);
     QCOMPARE(trusted_agent_result.enrollment_fingerprint.at(4), QLatin1Char('-'));
 
-    QVERIFY(QFile::exists(app_paths.ca_key_path()));
-    QVERIFY(QFile::exists(app_paths.ca_certificate_path()));
-    QVERIFY(QFile::exists(app_paths.server_key_path()));
-    QVERIFY(QFile::exists(app_paths.server_certificate_path()));
-    QVERIFY(QFile::exists(app_paths.peer_list_path()));
+    QVERIFY(QFile::exists(safekeeping_vault_db_path()));
+    QString vault_error{};
+    QVERIFY(!security_materials.current_ca_certificate_pem(vault_error).isEmpty());
+    QVERIFY2(vault_error.isEmpty(), qPrintable(vault_error));
+    QVERIFY(!security_materials.current_server_certificate_pem(vault_error).isEmpty());
+    QVERIFY2(vault_error.isEmpty(), qPrintable(vault_error));
+    QVERIFY(!security_materials.current_peer_certificate_pem(vault_error).isEmpty());
+    QVERIFY2(vault_error.isEmpty(), qPrintable(vault_error));
 
     const auto enrollment = security_materials.prepare_enrollment_request(QStringLiteral("joining-box"));
     QVERIFY2(enrollment.success, qPrintable(enrollment.error_message));
@@ -420,28 +444,17 @@ void sharedcore_tests::security_materials_reset_local_agent_state()
     });
     pending_repository.save_decision(QStringLiteral("request-1"), true, QStringLiteral("Approved"));
 
-    QVERIFY(QFile::exists(app_paths.ca_key_path()));
-    QVERIFY(QFile::exists(app_paths.server_certificate_path()));
-    QVERIFY(QFile::exists(app_paths.peer_key_path()));
-    QVERIFY(QFile::exists(app_paths.peer_list_path()));
     QCOMPARE(pending_repository.load_requests().size(), 1);
 
     const auto reset_result = security_materials.reset_local_agent_state();
     QVERIFY2(reset_result.success, qPrintable(reset_result.error_message));
 
-    QVERIFY(!QFile::exists(app_paths.ca_key_path()));
-    QVERIFY(!QFile::exists(app_paths.ca_certificate_path()));
-    QVERIFY(!QFile::exists(app_paths.server_key_path()));
-    QVERIFY(!QFile::exists(app_paths.server_certificate_path()));
-    QVERIFY(!QFile::exists(app_paths.pinned_trusted_agent_ca_certificate_path()));
-    QVERIFY(!QFile::exists(app_paths.peer_key_path()));
-    QVERIFY(!QFile::exists(app_paths.peer_certificate_path()));
-    QVERIFY(!QFile::exists(app_paths.peer_certificate_der_path()));
-    QVERIFY(!QFile::exists(app_paths.peer_csr_der_path()));
-    QVERIFY(!QFile::exists(app_paths.x25519_private_key_path()));
-    QVERIFY(!QFile::exists(app_paths.peer_list_path()));
+    QString post_reset_error{};
+    QVERIFY(security_materials.current_ca_certificate_pem(post_reset_error).isEmpty());
+    QVERIFY(security_materials.current_peer_private_key_pem(post_reset_error).isEmpty());
     QVERIFY(!QFile::exists(app_paths.address_hints_path()));
     QVERIFY(!QFile::exists(app_paths.peer_status_path()));
+    QVERIFY(!QFile::exists(safekeeping_vault_db_path()));
     QCOMPARE(pending_repository.load_requests().size(), 0);
     QVERIFY(QDir{app_paths.pending_enrollments_dir()}.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty());
 }
@@ -542,6 +555,10 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
         QCOMPARE(sender_public_key.size(), 32);
 
         QString random_error{};
+        const auto sender_private_key_pem = security_materials.current_x25519_private_key_pem(random_error);
+        QVERIFY2(random_error.isEmpty(), qPrintable(random_error));
+        QVERIFY(!sender_private_key_pem.isEmpty());
+
         payload_key = shared::desktop::core::transfer_crypto::random_bytes(
             shared::desktop::core::transfer_crypto::payload_key_size,
             random_error);
@@ -550,7 +567,7 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
 
         QString wrap_error{};
         wrapped_payload_key = shared::desktop::core::transfer_crypto::wrap_payload_key_for_recipient(
-            app_paths,
+            sender_private_key_pem,
             recipient_public_key,
             payload_key,
             wrap_error);
@@ -562,11 +579,18 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
         environment_guard guard{recipient_dir};
         shared::desktop::core::app_paths app_paths{};
         QVERIFY(app_paths.ensure_directories());
+        shared::desktop::core::security_materials security_materials{app_paths};
+        const auto restore_result = security_materials.ensure_runtime_materials();
+        QVERIFY2(restore_result.success, qPrintable(restore_result.error_message));
+        QString recipient_key_error{};
+        const auto recipient_private_key_pem = security_materials.current_x25519_private_key_pem(recipient_key_error);
+        QVERIFY2(recipient_key_error.isEmpty(), qPrintable(recipient_key_error));
+        QVERIFY(!recipient_private_key_pem.isEmpty());
 
         QString unwrap_error{};
         const auto unwrapped_payload_key =
             shared::desktop::core::transfer_crypto::unwrap_payload_key_from_sender(
-                app_paths,
+                recipient_private_key_pem,
                 sender_public_key,
                 wrapped_payload_key,
                 unwrap_error);

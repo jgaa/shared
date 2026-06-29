@@ -3,15 +3,15 @@
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/envelope_io.h"
 
+#include <safekeeping/SafeKeeping.h>
+
 #include <QtCore/QDir>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QFile>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QRandomGenerator>
-#include <QtCore/QSaveFile>
 #include <QtCore/QSet>
-#include <QtCore/QTemporaryDir>
 #include <QtCore/QUuid>
 #include <QtNetwork/QSslCertificate>
 #include <QtProtobuf/QProtobufSerializer>
@@ -22,7 +22,10 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include <array>
 #include <exception>
+#include <mutex>
+#include <span>
 #include <stdexcept>
 
 namespace shared::desktop::core {
@@ -31,14 +34,75 @@ Q_LOGGING_CATEGORY(shared_security_materials_log, "shared.desktop.core.security_
 
 namespace {
 
-QSslCertificate load_certificate_from_path(const QString &path)
+using safekeeping_t = jgaa::safekeeping::SafeKeeping;
+
+constexpr auto shared_vault_namespace = "shared-desktop";
+constexpr auto shared_vault_namespace_env = "SHARED_SAFEKEEPING_NAMESPACE";
+constexpr auto shared_vault_testing_env = "SHARED_SAFEKEEPING_TESTING";
+
+struct vault_secret_definition {
+    const char *name;
+    const char *description;
+};
+
+const std::array<vault_secret_definition, 12> &vault_secret_definitions()
 {
-    QFile file{path};
-    if (!file.open(QIODevice::ReadOnly)) {
-        qCWarning(shared_security_materials_log) << "Failed to open certificate" << path << file.errorString();
-        return QSslCertificate{};
-    }
-    return QSslCertificate{file.readAll(), QSsl::Pem};
+    static const auto definitions = std::array<vault_secret_definition, 12>{{
+        {"trusted-agent-ca-key", "Trusted-agent CA private key"},
+        {"trusted-agent-ca-certificate", "Trusted-agent CA certificate"},
+        {"trusted-agent-ca-serial", "Trusted-agent CA serial state"},
+        {"trusted-agent-server-key", "Trusted-agent server private key"},
+        {"trusted-agent-server-certificate", "Trusted-agent server certificate"},
+        {"trusted-agent-server-certificate-der", "Trusted-agent server DER certificate"},
+        {"trusted-agent-pinned-ca-certificate-der", "Pinned trusted-agent CA certificate"},
+        {"peer-key", "Peer private key"},
+        {"peer-certificate", "Peer certificate"},
+        {"peer-certificate-der", "Peer DER certificate"},
+        {"peer-csr-der", "Peer CSR DER"},
+        {"peer-x25519-key", "Peer X25519 private key"},
+    }};
+    return definitions;
+}
+
+const vault_secret_definition peer_list_secret_definition{
+    "trusted-agent-peer-list",
+    "Trusted-agent peer list",
+};
+
+const vault_secret_definition &ca_key_secret() { return vault_secret_definitions()[0]; }
+const vault_secret_definition &ca_certificate_secret() { return vault_secret_definitions()[1]; }
+const vault_secret_definition &ca_serial_secret() { return vault_secret_definitions()[2]; }
+const vault_secret_definition &server_key_secret() { return vault_secret_definitions()[3]; }
+const vault_secret_definition &server_certificate_secret() { return vault_secret_definitions()[4]; }
+const vault_secret_definition &server_certificate_der_secret() { return vault_secret_definitions()[5]; }
+const vault_secret_definition &pinned_ca_certificate_der_secret() { return vault_secret_definitions()[6]; }
+const vault_secret_definition &peer_key_secret() { return vault_secret_definitions()[7]; }
+const vault_secret_definition &peer_certificate_secret() { return vault_secret_definitions()[8]; }
+const vault_secret_definition &peer_certificate_der_secret() { return vault_secret_definitions()[9]; }
+const vault_secret_definition &peer_csr_der_secret() { return vault_secret_definitions()[10]; }
+const vault_secret_definition &x25519_key_secret() { return vault_secret_definitions()[11]; }
+
+struct process_secret_cache_state {
+    std::mutex mutex{};
+    QHash<QString, QByteArray> bytes{};
+    QHash<QString, bool> missing{};
+};
+
+std::string current_vault_namespace();
+
+process_secret_cache_state &process_secret_cache()
+{
+    static process_secret_cache_state cache{};
+    return cache;
+}
+
+QString current_secret_cache_key(const char *name)
+{
+    return QString::fromUtf8(name)
+        + QLatin1Char('|')
+        + QString::fromStdString(current_vault_namespace())
+        + QLatin1Char('|')
+        + qEnvironmentVariable("SAFEKEEPING_DATA_DIR");
 }
 
 qint64 to_epoch_ms(const QDateTime &time)
@@ -117,34 +181,6 @@ bool validate_peer_entries(const QList<shared::v1::PeerListEntry> &entries, QStr
     throw std::runtime_error(message.toStdString());
 }
 
-void ensure_file_open(QFileDevice &file, QIODeviceBase::OpenMode mode, const QString &message)
-{
-    if (!file.open(mode)) {
-        throw_security_error(message + QStringLiteral(": ") + file.errorString());
-    }
-}
-
-void ensure_save_file_open(QSaveFile &file, QIODeviceBase::OpenMode mode, const QString &message)
-{
-    if (!file.open(mode)) {
-        throw_security_error(message + QStringLiteral(": ") + file.errorString());
-    }
-}
-
-void ensure_write(QFileDevice &file, const QByteArray &data, const QString &message)
-{
-    if (file.write(data) != data.size()) {
-        throw_security_error(message + QStringLiteral(": ") + file.errorString());
-    }
-}
-
-void ensure_commit(QSaveFile &file, const QString &message)
-{
-    if (!file.commit()) {
-        throw_security_error(message + QStringLiteral(": ") + file.errorString());
-    }
-}
-
 void remove_if_exists(const QString &path, const QString &message)
 {
     if (!QFile::remove(path) && QFile::exists(path)) {
@@ -176,14 +212,178 @@ void remove_directory_contents(const QString &path, const QString &message)
     }
 }
 
-QByteArray read_file_bytes(const QString &path, const QString &message)
+void configure_vault_backend()
 {
-    QFile file{path};
-    if (!file.open(QIODevice::ReadOnly)) {
-        throw_security_error(message + QStringLiteral(": ") + file.errorString());
+    safekeeping_t::setLinuxVaultRootName("eu.lastviking.shared");
+    safekeeping_t::setLinuxVaultBackend(safekeeping_t::LinuxVaultBackend::Auto);
+}
+
+std::string current_vault_namespace()
+{
+    const auto override_namespace = qEnvironmentVariable(shared_vault_namespace_env).trimmed();
+    if (!override_namespace.isEmpty()) {
+        return override_namespace.toStdString();
     }
 
-    return file.readAll();
+    return shared_vault_namespace;
+}
+
+bool testing_vault_cleanup_enabled()
+{
+    const auto value = qEnvironmentVariable(shared_vault_testing_env).trimmed().toLower();
+    return value == QStringLiteral("1")
+        || value == QStringLiteral("true")
+        || value == QStringLiteral("yes")
+        || value == QStringLiteral("on");
+}
+
+void remove_current_vault_namespace()
+{
+    configure_vault_backend();
+    safekeeping_t::removeNamespace(current_vault_namespace());
+}
+
+void initialize_vault_process_lifecycle()
+{
+    static std::once_flag once{};
+    std::call_once(once, []() {
+        if (!testing_vault_cleanup_enabled()) {
+            return;
+        }
+
+        try {
+            if (safekeeping_t::exists(current_vault_namespace())) {
+                remove_current_vault_namespace();
+            }
+        } catch (const std::exception &exception) {
+            qCWarning(shared_security_materials_log)
+                << "Failed to clear test vault namespace on startup"
+                << exception.what();
+        }
+
+        std::atexit([]() {
+            try {
+                if (testing_vault_cleanup_enabled() && safekeeping_t::exists(current_vault_namespace())) {
+                    remove_current_vault_namespace();
+                }
+            } catch (...) {
+            }
+        });
+    });
+}
+
+QString latest_vault_error(const safekeeping_t &vault)
+{
+    return QString::fromStdString(vault.latestError().message);
+}
+
+safekeeping_t::ptr_t open_vault(bool create_if_missing, QString &error_message)
+{
+    initialize_vault_process_lifecycle();
+    configure_vault_backend();
+
+    try {
+        safekeeping_t::ptr_t vault{};
+        if (create_if_missing) {
+            safekeeping_t::CreateOptions options{};
+            options.createSystemVaultSlot = true;
+            options.requireAtLeastOneUnlockMethod = true;
+            vault = safekeeping_t::openOrCreate(current_vault_namespace(), options);
+        } else {
+            vault = safekeeping_t::open(current_vault_namespace());
+        }
+
+        if (!vault) {
+            return nullptr;
+        }
+
+        if (!vault->isUnlocked() && !vault->unlockWithSystemVault()) {
+            error_message = latest_vault_error(*vault);
+            if (error_message.isEmpty()) {
+                error_message = QStringLiteral("Failed to unlock local secret vault");
+            }
+            return nullptr;
+        }
+
+        return vault;
+    } catch (const std::exception &exception) {
+        error_message = QString::fromUtf8(exception.what());
+        return nullptr;
+    }
+}
+
+bool store_secret_bytes(
+    const vault_secret_definition &definition,
+    const QByteArray &bytes,
+    QString &error_message)
+{
+    auto vault = open_vault(true, error_message);
+    if (!vault) {
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to open local secret vault");
+        }
+        return false;
+    }
+
+    const auto view = std::span<const std::byte>{
+        reinterpret_cast<const std::byte *>(bytes.constData()),
+        static_cast<size_t>(bytes.size())};
+    if (!vault->storeSecretWithDescription(definition.name, view, definition.description)) {
+        error_message = latest_vault_error(*vault);
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to persist secret in local vault");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool remove_secret_bytes(const vault_secret_definition &definition, QString &error_message)
+{
+    auto vault = open_vault(false, error_message);
+    if (!vault) {
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to open local secret vault");
+        }
+        return false;
+    }
+
+    if (!vault->removeSecret(definition.name)
+        && vault->latestError().error != safekeeping_t::Error::NotFound) {
+        error_message = latest_vault_error(*vault);
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to remove secret from local vault");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+QByteArray load_secret_bytes(const vault_secret_definition &definition, QString &error_message)
+{
+    auto vault = open_vault(false, error_message);
+    if (!vault) {
+        return {};
+    }
+
+    const auto secret = vault->retrieveSecretBytes(definition.name);
+    if (!secret.has_value()) {
+        if (vault->latestError().error == safekeeping_t::Error::NotFound) {
+            return {};
+        }
+
+        error_message = latest_vault_error(*vault);
+        if (error_message.isEmpty()) {
+            error_message = QStringLiteral("Failed to load secret from local vault");
+        }
+        return {};
+    }
+
+    return QByteArray{
+        reinterpret_cast<const char *>(secret->data()),
+        static_cast<qsizetype>(secret->size())};
 }
 
 bool verify_peer_list_signature(
@@ -267,12 +467,12 @@ int cn_name_nid()
     return OBJ_txt2nid("CN");
 }
 
-evp_pkey_ptr load_private_key(const QString &path, const QString &context)
+evp_pkey_ptr load_private_key(const QByteArray &pem_data, const QString &context)
 {
-    QFile file{path};
-    ensure_file_open(file, QIODevice::ReadOnly, context);
+    if (pem_data.isEmpty()) {
+        throw_security_error(context + QStringLiteral(": private key is empty"));
+    }
 
-    const auto pem_data = file.readAll();
     bio_ptr bio{BIO_new_mem_buf(pem_data.constData(), static_cast<int>(pem_data.size())), BIO_free};
     if (bio == nullptr) {
         throw_security_error(context + QStringLiteral(": failed to create BIO"));
@@ -306,13 +506,6 @@ x509_ptr load_certificate_any_format(const QByteArray &data, const QString &cont
     throw_security_error(context + QStringLiteral(": failed to parse certificate: ") + latest_openssl_error());
 }
 
-x509_ptr load_certificate(const QString &path, const QString &context)
-{
-    QFile file{path};
-    ensure_file_open(file, QIODevice::ReadOnly, context);
-    return load_certificate_any_format(file.readAll(), context);
-}
-
 x509_req_ptr load_csr_der(const QByteArray &der, const QString &context)
 {
     const unsigned char *data =
@@ -325,7 +518,7 @@ x509_req_ptr load_csr_der(const QByteArray &der, const QString &context)
     return request;
 }
 
-void write_private_key_pem(EVP_PKEY *key, const QString &path, const QString &context)
+QByteArray private_key_to_pem(EVP_PKEY *key, const QString &context)
 {
     bio_ptr bio{BIO_new(BIO_s_mem()), BIO_free};
     if (bio == nullptr) {
@@ -342,13 +535,10 @@ void write_private_key_pem(EVP_PKEY *key, const QString &path, const QString &co
         throw_security_error(context + QStringLiteral(": failed to read serialized private key"));
     }
 
-    QSaveFile file{path};
-    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
-    ensure_write(file, QByteArray{buffer->data, static_cast<qsizetype>(buffer->length)}, context);
-    ensure_commit(file, context);
+    return QByteArray{buffer->data, static_cast<qsizetype>(buffer->length)};
 }
 
-void write_x509_pem(X509 *certificate, const QString &path, const QString &context)
+QByteArray x509_to_pem(X509 *certificate, const QString &context)
 {
     bio_ptr bio{BIO_new(BIO_s_mem()), BIO_free};
     if (bio == nullptr) {
@@ -365,13 +555,10 @@ void write_x509_pem(X509 *certificate, const QString &path, const QString &conte
         throw_security_error(context + QStringLiteral(": failed to read serialized certificate"));
     }
 
-    QSaveFile file{path};
-    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
-    ensure_write(file, QByteArray{buffer->data, static_cast<qsizetype>(buffer->length)}, context);
-    ensure_commit(file, context);
+    return QByteArray{buffer->data, static_cast<qsizetype>(buffer->length)};
 }
 
-void write_x509_der(X509 *certificate, const QString &path, const QString &context)
+QByteArray x509_to_der(X509 *certificate, const QString &context)
 {
     const auto size = i2d_X509(certificate, nullptr);
     if (size <= 0) {
@@ -384,13 +571,10 @@ void write_x509_der(X509 *certificate, const QString &path, const QString &conte
         i2d_X509(certificate, &output) == size,
         context + QStringLiteral(": failed to serialize DER certificate"));
 
-    QSaveFile file{path};
-    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
-    ensure_write(file, der, context);
-    ensure_commit(file, context);
+    return der;
 }
 
-void write_csr_der(X509_REQ *request, const QString &path, const QString &context)
+QByteArray csr_to_der(X509_REQ *request, const QString &context)
 {
     const auto size = i2d_X509_REQ(request, nullptr);
     if (size <= 0) {
@@ -403,10 +587,7 @@ void write_csr_der(X509_REQ *request, const QString &path, const QString &contex
         i2d_X509_REQ(request, &output) == size,
         context + QStringLiteral(": failed to serialize DER CSR"));
 
-    QSaveFile file{path};
-    ensure_save_file_open(file, QIODevice::WriteOnly | QIODevice::Truncate, context);
-    ensure_write(file, der, context);
-    ensure_commit(file, context);
+    return der;
 }
 
 void set_subject_common_name(X509_NAME *name, const QString &common_name, const QString &context)
@@ -451,19 +632,21 @@ void add_extension(X509 *certificate, X509 *issuer, const int nid, const char *v
         context + QStringLiteral(": failed to add X509 extension"));
 }
 
-qulonglong next_certificate_serial(const QString &serial_path)
+qulonglong next_certificate_serial()
 {
     qulonglong current_serial = 1;
-    QFile file{serial_path};
-    if (file.exists()) {
-        ensure_file_open(file, QIODevice::ReadOnly, QStringLiteral("Failed to open CA serial file"));
-        const auto text = file.readAll().trimmed();
+    QString serial_error{};
+    const auto current_serial_bytes = load_secret_bytes(ca_serial_secret(), serial_error);
+    if (!current_serial_bytes.isEmpty()) {
+        const auto text = current_serial_bytes.trimmed();
         bool ok{};
         const auto parsed = text.toULongLong(&ok, 16);
         if (!ok || parsed == 0) {
             throw_security_error(QStringLiteral("Failed to parse CA serial file"));
         }
         current_serial = parsed;
+    } else if (!serial_error.isEmpty()) {
+        throw_security_error(serial_error);
     } else {
         current_serial = QRandomGenerator::system()->generate64();
         current_serial &= 0x7fffffffffffffffULL;
@@ -472,14 +655,11 @@ qulonglong next_certificate_serial(const QString &serial_path)
         }
     }
 
-    QSaveFile save_file{serial_path};
-    ensure_save_file_open(
-        save_file,
-        QIODevice::WriteOnly | QIODevice::Truncate,
-        QStringLiteral("Failed to open CA serial file for write"));
     const auto next_serial = QByteArray::number(current_serial + 1, 16).toUpper() + '\n';
-    ensure_write(save_file, next_serial, QStringLiteral("Failed to write CA serial file"));
-    ensure_commit(save_file, QStringLiteral("Failed to commit CA serial file"));
+    QString write_error{};
+    if (!store_secret_bytes(ca_serial_secret(), next_serial, write_error)) {
+        throw_security_error(write_error);
+    }
 
     return current_serial;
 }
@@ -564,6 +744,105 @@ security_materials::security_materials(const app_paths &app_paths)
 {
 }
 
+QByteArray security_materials::load_secret_bytes_cached(
+    const char *name,
+    const char *description,
+    QString &error_message) const
+{
+    const auto secret_name = current_secret_cache_key(name);
+    auto &cache = process_secret_cache();
+    {
+        std::lock_guard lock{cache.mutex};
+        const auto cached = cache.bytes.constFind(secret_name);
+        if (cached != cache.bytes.cend()) {
+            return cached.value();
+        }
+
+        if (cache.missing.contains(secret_name)) {
+            return {};
+        }
+    }
+
+    const vault_secret_definition definition{name, description};
+    const auto bytes = load_secret_bytes(definition, error_message);
+    if (!error_message.isEmpty()) {
+        return {};
+    }
+
+    if (bytes.isEmpty()) {
+        auto &state = process_secret_cache();
+        std::lock_guard lock{state.mutex};
+        state.bytes.remove(secret_name);
+        state.missing.insert(secret_name, true);
+        return {};
+    }
+
+    {
+        auto &state = process_secret_cache();
+        std::lock_guard lock{state.mutex};
+        state.bytes.insert(secret_name, bytes);
+        state.missing.remove(secret_name);
+    }
+    return bytes;
+}
+
+bool security_materials::store_secret_bytes_cached(
+    const char *name,
+    const char *description,
+    const QByteArray &bytes,
+    QString &error_message) const
+{
+    const vault_secret_definition definition{name, description};
+    if (!store_secret_bytes(definition, bytes, error_message)) {
+        return false;
+    }
+
+    {
+        auto &cache = process_secret_cache();
+        std::lock_guard lock{cache.mutex};
+        const auto secret_name = current_secret_cache_key(name);
+        cache.bytes.insert(secret_name, bytes);
+        cache.missing.remove(secret_name);
+    }
+    return true;
+}
+
+bool security_materials::remove_secret_cached(const char *name, QString &error_message) const
+{
+    const vault_secret_definition definition{name, ""};
+    if (!remove_secret_bytes(definition, error_message)) {
+        return false;
+    }
+
+    {
+        auto &cache = process_secret_cache();
+        std::lock_guard lock{cache.mutex};
+        const auto secret_name = current_secret_cache_key(name);
+        cache.bytes.remove(secret_name);
+        cache.missing.insert(secret_name, true);
+    }
+    return true;
+}
+
+void security_materials::clear_secret_cache() const
+{
+    auto &cache = process_secret_cache();
+    std::lock_guard lock{cache.mutex};
+    cache.bytes.clear();
+    cache.missing.clear();
+}
+
+security_materials::operation_result security_materials::ensure_runtime_materials() const
+{
+    operation_result result{};
+    result.success = app_paths_.ensure_directories();
+    if (!result.success) {
+        result.error_message = QStringLiteral("Failed to prepare application runtime directories");
+    }
+
+    return result;
+}
+
 security_materials::operation_result security_materials::reset_local_agent_state() const
 {
     operation_result result{};
@@ -590,6 +869,11 @@ security_materials::operation_result security_materials::reset_local_agent_state
         remove_directory_contents(
             app_paths_.pending_enrollments_dir(),
             QStringLiteral("Failed to clear pending enrollment state"));
+        configure_vault_backend();
+        if (safekeeping_t::exists(current_vault_namespace())) {
+            safekeeping_t::removeNamespace(current_vault_namespace());
+        }
+        clear_secret_cache();
     } catch (const std::exception &exception) {
         result.success = false;
         result.error_message = QString::fromUtf8(exception.what());
@@ -606,25 +890,217 @@ const
     trusted_agent_init_result result{};
     result.peer_id = uuid_v7_string();
 
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        result.error_message = runtime_result.error_message;
+        return result;
+    }
+
     try {
-        if (!generate_ec_private_key(app_paths_.ca_key_path(), result.error_message)
-            || !generate_self_signed_ca(result.error_message)
-            || !generate_ec_private_key(app_paths_.server_key_path(), result.error_message)
-            || !generate_signed_certificate(
-                app_paths_.server_key_path(),
-                app_paths_.server_certificate_path(),
-                app_paths_.server_certificate_der_path(),
-                QStringLiteral("shared-enrollment-server"),
+        const auto ca_key = generate_private_key(
+            "EC",
+            "prime256v1",
+            QStringLiteral("Failed to generate EC private key"));
+        const auto ca_key_pem = private_key_to_pem(ca_key.get(), QStringLiteral("Failed to serialize CA private key"));
+        if (!store_secret_bytes_cached(
+                ca_key_secret().name,
+                ca_key_secret().description,
+                ca_key_pem,
+                result.error_message)) {
+            return result;
+        }
+
+        x509_ptr ca_certificate{X509_new(), X509_free};
+        if (ca_certificate == nullptr) {
+            throw_security_error(QStringLiteral("Failed to allocate CA certificate"));
+        }
+        ensure_openssl_success(
+            X509_set_version(ca_certificate.get(), 2L) == 1,
+            QStringLiteral("Failed to set CA certificate version"));
+        const auto ca_serial = make_asn1_serial(1, QStringLiteral("Failed to create CA certificate serial"));
+        ensure_openssl_success(
+            X509_set_serialNumber(ca_certificate.get(), ca_serial.get()) == 1,
+            QStringLiteral("Failed to assign CA certificate serial"));
+        set_certificate_validity(ca_certificate.get(), QStringLiteral("Failed to set CA certificate validity"));
+        auto *ca_subject = X509_get_subject_name(ca_certificate.get());
+        if (ca_subject == nullptr) {
+            throw_security_error(QStringLiteral("Failed to get CA certificate subject"));
+        }
+        set_subject_common_name(
+            ca_subject,
+            QStringLiteral("shared-trusted-agent-ca"),
+            QStringLiteral("Failed to set CA certificate subject"));
+        ensure_openssl_success(
+            X509_set_issuer_name(ca_certificate.get(), ca_subject) == 1,
+            QStringLiteral("Failed to set CA certificate issuer"));
+        ensure_openssl_success(
+            X509_set_pubkey(ca_certificate.get(), ca_key.get()) == 1,
+            QStringLiteral("Failed to set CA certificate public key"));
+        add_extension(
+            ca_certificate.get(),
+            ca_certificate.get(),
+            NID_basic_constraints,
+            "critical,CA:TRUE",
+            QStringLiteral("Failed to configure CA certificate basic constraints"));
+        add_extension(
+            ca_certificate.get(),
+            ca_certificate.get(),
+            NID_key_usage,
+            "critical,keyCertSign,cRLSign",
+            QStringLiteral("Failed to configure CA certificate key usage"));
+        add_extension(
+            ca_certificate.get(),
+            ca_certificate.get(),
+            NID_subject_key_identifier,
+            "hash",
+            QStringLiteral("Failed to configure CA certificate subject key identifier"));
+        ensure_openssl_success(
+            X509_sign(ca_certificate.get(), ca_key.get(), EVP_sha256()) > 0,
+            QStringLiteral("Failed to self-sign CA certificate"));
+        const auto ca_certificate_pem = x509_to_pem(ca_certificate.get(), QStringLiteral("Failed to serialize CA certificate"));
+        if (!store_secret_bytes_cached(
+                ca_certificate_secret().name,
+                ca_certificate_secret().description,
+                ca_certificate_pem,
+                result.error_message)) {
+            return result;
+        }
+
+        const auto server_key = generate_private_key(
+            "EC",
+            "prime256v1",
+            QStringLiteral("Failed to generate server private key"));
+        const auto server_key_pem = private_key_to_pem(server_key.get(), QStringLiteral("Failed to serialize server private key"));
+        if (!store_secret_bytes_cached(
+                server_key_secret().name,
+                server_key_secret().description,
+                server_key_pem,
+                result.error_message)) {
+            return result;
+        }
+
+        const auto create_leaf = [&](EVP_PKEY *leaf_key, const QString &subject_common_name, QByteArray *csr_der) {
+            const auto request = create_certificate_request(
+                leaf_key,
+                subject_common_name,
+                QStringLiteral("Failed to create certificate request"));
+            if (csr_der != nullptr) {
+                *csr_der = csr_to_der(request.get(), QStringLiteral("Failed to serialize certificate request"));
+            }
+
+            evp_pkey_ptr request_public_key{X509_REQ_get_pubkey(request.get()), EVP_PKEY_free};
+            if (request_public_key == nullptr) {
+                throw_security_error(QStringLiteral("Failed to extract certificate request public key"));
+            }
+
+            x509_ptr certificate{X509_new(), X509_free};
+            if (certificate == nullptr) {
+                throw_security_error(QStringLiteral("Failed to allocate signed certificate"));
+            }
+
+            ensure_openssl_success(
+                X509_set_version(certificate.get(), 2L) == 1,
+                QStringLiteral("Failed to set signed certificate version"));
+            const auto serial = make_asn1_serial(
+                next_certificate_serial(),
+                QStringLiteral("Failed to create signed certificate serial"));
+            ensure_openssl_success(
+                X509_set_serialNumber(certificate.get(), serial.get()) == 1,
+                QStringLiteral("Failed to assign signed certificate serial"));
+            set_certificate_validity(certificate.get(), QStringLiteral("Failed to set signed certificate validity"));
+            ensure_openssl_success(
+                X509_set_issuer_name(certificate.get(), X509_get_subject_name(ca_certificate.get())) == 1,
+                QStringLiteral("Failed to set signed certificate issuer"));
+            ensure_openssl_success(
+                X509_set_subject_name(certificate.get(), X509_REQ_get_subject_name(request.get())) == 1,
+                QStringLiteral("Failed to set signed certificate subject"));
+            ensure_openssl_success(
+                X509_set_pubkey(certificate.get(), request_public_key.get()) == 1,
+                QStringLiteral("Failed to set signed certificate public key"));
+            add_extension(
+                certificate.get(),
+                ca_certificate.get(),
+                NID_basic_constraints,
+                "critical,CA:FALSE",
+                QStringLiteral("Failed to configure signed certificate basic constraints"));
+            add_extension(
+                certificate.get(),
+                ca_certificate.get(),
+                NID_key_usage,
+                "critical,digitalSignature,keyAgreement",
+                QStringLiteral("Failed to configure signed certificate key usage"));
+            add_extension(
+                certificate.get(),
+                ca_certificate.get(),
+                NID_ext_key_usage,
+                "serverAuth,clientAuth",
+                QStringLiteral("Failed to configure signed certificate extended key usage"));
+            ensure_openssl_success(
+                X509_sign(certificate.get(), ca_key.get(), EVP_sha256()) > 0,
+                QStringLiteral("Failed to sign certificate"));
+
+            return std::pair{
+                x509_to_pem(certificate.get(), QStringLiteral("Failed to serialize signed certificate PEM")),
+                x509_to_der(certificate.get(), QStringLiteral("Failed to serialize signed certificate DER"))};
+        };
+
+        const auto [server_certificate_pem, server_certificate_der] =
+            create_leaf(server_key.get(), QStringLiteral("shared-enrollment-server"), nullptr);
+        if (!store_secret_bytes_cached(
+                server_certificate_secret().name,
+                server_certificate_secret().description,
+                server_certificate_pem,
                 result.error_message)
-            || !generate_ec_private_key(app_paths_.peer_key_path(), result.error_message)
-            || !generate_signed_certificate(
-                app_paths_.peer_key_path(),
-                app_paths_.peer_certificate_path(),
-                app_paths_.peer_certificate_der_path(),
-                name,
-                result.error_message,
-                app_paths_.peer_csr_der_path())
-            || !generate_x25519_private_key(app_paths_.x25519_private_key_path(), result.error_message)) {
+            || !store_secret_bytes_cached(
+                server_certificate_der_secret().name,
+                server_certificate_der_secret().description,
+                server_certificate_der,
+                result.error_message)) {
+            return result;
+        }
+
+        const auto peer_key = generate_private_key(
+            "EC",
+            "prime256v1",
+            QStringLiteral("Failed to generate peer private key"));
+        const auto peer_key_pem = private_key_to_pem(peer_key.get(), QStringLiteral("Failed to serialize peer private key"));
+        if (!store_secret_bytes_cached(
+                peer_key_secret().name,
+                peer_key_secret().description,
+                peer_key_pem,
+                result.error_message)) {
+            return result;
+        }
+        QByteArray peer_csr_der{};
+        const auto [peer_certificate_pem, peer_certificate_der] = create_leaf(peer_key.get(), name, &peer_csr_der);
+        if (!store_secret_bytes_cached(
+                peer_certificate_secret().name,
+                peer_certificate_secret().description,
+                peer_certificate_pem,
+                result.error_message)
+            || !store_secret_bytes_cached(
+                peer_certificate_der_secret().name,
+                peer_certificate_der_secret().description,
+                peer_certificate_der,
+                result.error_message)
+            || !store_secret_bytes_cached(
+                peer_csr_der_secret().name,
+                peer_csr_der_secret().description,
+                peer_csr_der,
+                result.error_message)) {
+            return result;
+        }
+
+        const auto x25519_key = generate_private_key(
+            "X25519",
+            nullptr,
+            QStringLiteral("Failed to generate X25519 private key"));
+        const auto x25519_key_pem = private_key_to_pem(x25519_key.get(), QStringLiteral("Failed to serialize X25519 private key"));
+        if (!store_secret_bytes_cached(
+                x25519_key_secret().name,
+                x25519_key_secret().description,
+                x25519_key_pem,
+                result.error_message)) {
             return result;
         }
 
@@ -664,42 +1140,62 @@ security_materials::prepared_enrollment security_materials::prepare_enrollment_r
     prepared_enrollment result{};
     result.peer_id = uuid_v7_string();
 
-    if (!generate_ec_private_key(app_paths_.peer_key_path(), result.error_message)) {
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        result.error_message = runtime_result.error_message;
         return result;
     }
 
-    remove_if_exists(app_paths_.peer_certificate_path(), QStringLiteral("Failed to remove stale peer certificate file"));
-    remove_if_exists(app_paths_.peer_certificate_der_path(), QStringLiteral("Failed to remove stale peer certificate DER file"));
-    remove_if_exists(app_paths_.peer_csr_der_path(), QStringLiteral("Failed to remove stale peer CSR file"));
-
     try {
-        const auto key = load_private_key(
-            app_paths_.peer_key_path(),
-            QStringLiteral("Failed to load peer private key for enrollment CSR"));
+        const auto key = generate_private_key(
+            "EC",
+            "prime256v1",
+            QStringLiteral("Failed to generate peer private key for enrollment"));
+        const auto peer_key_pem = private_key_to_pem(key.get(), QStringLiteral("Failed to serialize peer private key"));
+        if (!store_secret_bytes_cached(
+                peer_key_secret().name,
+                peer_key_secret().description,
+                peer_key_pem,
+                result.error_message)) {
+            return result;
+        }
+
+        QString remove_error{};
+        if (!remove_secret_cached(peer_certificate_secret().name, remove_error)
+            || !remove_secret_cached(peer_certificate_der_secret().name, remove_error)
+            || !remove_secret_cached(peer_csr_der_secret().name, remove_error)) {
+            result.error_message = remove_error;
+            return result;
+        }
+
         const auto request = create_certificate_request(
             key.get(),
             name,
             QStringLiteral("Failed to generate enrollment CSR"));
-        write_csr_der(
-            request.get(),
-            app_paths_.peer_csr_der_path(),
-            QStringLiteral("Failed to persist enrollment CSR"));
-    } catch (const std::exception &exception) {
-        result.error_message = QString::fromUtf8(exception.what());
-        qCCritical(shared_security_materials_log) << "Failed to generate enrollment CSR" << result.error_message;
-        return result;
-    }
+        const auto csr_der = csr_to_der(request.get(), QStringLiteral("Failed to serialize enrollment CSR"));
+        if (!store_secret_bytes_cached(
+                peer_csr_der_secret().name,
+                peer_csr_der_secret().description,
+                csr_der,
+                result.error_message)) {
+            return result;
+        }
 
-    if (!generate_x25519_private_key(app_paths_.x25519_private_key_path(), result.error_message)) {
-        qCCritical(shared_security_materials_log) << "Failed to generate X25519 keypair for enrollment" << result.error_message;
-        return result;
-    }
+        const auto x25519_key = generate_private_key(
+            "X25519",
+            nullptr,
+            QStringLiteral("Failed to generate X25519 private key"));
+        const auto x25519_private_key_pem =
+            private_key_to_pem(x25519_key.get(), QStringLiteral("Failed to serialize X25519 private key"));
+        if (!store_secret_bytes_cached(
+                x25519_key_secret().name,
+                x25519_key_secret().description,
+                x25519_private_key_pem,
+                result.error_message)) {
+            return result;
+        }
 
-    QFile csr_file{app_paths_.peer_csr_der_path()};
-    try {
-        ensure_file_open(csr_file, QIODevice::ReadOnly, QStringLiteral("Failed to open generated CSR"));
-        const auto csr_der = csr_file.readAll();
-        const auto x25519_public_key = raw_x25519_public_key(app_paths_.x25519_private_key_path(), result.error_message);
+        const auto x25519_public_key = raw_x25519_public_key(x25519_private_key_pem, result.error_message);
         if (x25519_public_key.isEmpty()) {
             qCCritical(shared_security_materials_log) << "Failed to extract X25519 public key for enrollment" << result.error_message;
             return result;
@@ -715,18 +1211,20 @@ security_materials::prepared_enrollment security_materials::prepare_enrollment_r
         identity.setName(name);
         identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
 
-        shared::v1::EnrollmentRequest request{};
-        request.setRequestedIdentity(identity);
-        request.setCertificateRequest(csr_der);
-        request.setVerificationCode(result.verification_code);
-        request.setX25519PublicKey(x25519_public_key);
+        shared::v1::EnrollmentRequest request_message{};
+        request_message.setRequestedIdentity(identity);
+        request_message.setCertificateRequest(csr_der);
+        request_message.setVerificationCode(result.verification_code);
+        request_message.setX25519PublicKey(x25519_public_key);
 
-        result.request = request;
+        result.request = request_message;
         result.success = true;
     } catch (const std::exception &exception) {
         result.error_message = QString::fromUtf8(exception.what());
-        qCCritical(shared_security_materials_log) << "Failed to prepare enrollment request" << result.error_message;
+        qCCritical(shared_security_materials_log) << "Failed to generate enrollment CSR" << result.error_message;
+        return result;
     }
+
     return result;
 }
 
@@ -736,6 +1234,12 @@ security_materials::operation_result security_materials::finalize_enrollment(
 {
     operation_result result{};
     try {
+        const auto runtime_result = ensure_runtime_materials();
+        if (!runtime_result.success) {
+            result.error_message = runtime_result.error_message;
+            return result;
+        }
+
         if (!decision.approved()) {
             result.error_message = decision.message();
             qCCritical(shared_security_materials_log) << "Enrollment decision was rejected" << result.error_message;
@@ -748,21 +1252,24 @@ security_materials::operation_result security_materials::finalize_enrollment(
             return result;
         }
 
-        {
-            QSaveFile certificate_file{app_paths_.peer_certificate_der_path()};
-            ensure_save_file_open(certificate_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open peer certificate file"));
-            ensure_write(certificate_file, decision.signedCertificate(), QStringLiteral("Failed to write peer certificate file"));
-            ensure_commit(certificate_file, QStringLiteral("Failed to commit peer certificate file"));
-        }
-
         try {
-            const auto certificate = load_certificate(
-                app_paths_.peer_certificate_der_path(),
+            const auto certificate = load_certificate_any_format(
+                decision.signedCertificate(),
                 QStringLiteral("Failed to load enrolled peer certificate"));
-            write_x509_pem(
-                certificate.get(),
-                app_paths_.peer_certificate_path(),
-                QStringLiteral("Failed to write enrolled peer certificate"));
+            const auto certificate_pem =
+                x509_to_pem(certificate.get(), QStringLiteral("Failed to serialize enrolled peer certificate"));
+            if (!store_secret_bytes_cached(
+                    peer_certificate_der_secret().name,
+                    peer_certificate_der_secret().description,
+                    decision.signedCertificate(),
+                    result.error_message)
+                || !store_secret_bytes_cached(
+                    peer_certificate_secret().name,
+                    peer_certificate_secret().description,
+                    certificate_pem,
+                    result.error_message)) {
+                return result;
+            }
         } catch (const std::exception &exception) {
             result.error_message = QString::fromUtf8(exception.what());
             qCCritical(shared_security_materials_log) << "Failed to convert peer certificate to PEM" << result.error_message;
@@ -770,8 +1277,9 @@ security_materials::operation_result security_materials::finalize_enrollment(
         }
 
         QString installed_fingerprint_error{};
-        const auto installed_fingerprint =
-            certificate_fingerprint(app_paths_.peer_certificate_path(), installed_fingerprint_error);
+        const auto installed_fingerprint = certificate_fingerprint(
+            current_peer_certificate_pem(installed_fingerprint_error),
+            installed_fingerprint_error);
         if (installed_fingerprint.isEmpty()) {
             result.error_message = installed_fingerprint_error.isEmpty()
                 ? QStringLiteral("Failed to derive installed peer certificate fingerprint")
@@ -784,14 +1292,16 @@ security_materials::operation_result security_materials::finalize_enrollment(
 
         qCInfo(shared_security_materials_log)
             << "Installed enrolled peer certificate"
-            << "fingerprint=" << installed_fingerprint
-            << "certificate_path=" << app_paths_.peer_certificate_path();
+            << "fingerprint=" << installed_fingerprint;
 
         if (decision.hasTrustedAgentCaCertificate()) {
-            QSaveFile ca_file{app_paths_.pinned_trusted_agent_ca_certificate_path()};
-            ensure_save_file_open(ca_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open pinned trusted-agent CA file"));
-            ensure_write(ca_file, decision.trustedAgentCaCertificate(), QStringLiteral("Failed to write pinned trusted-agent CA file"));
-            ensure_commit(ca_file, QStringLiteral("Failed to commit pinned trusted-agent CA file"));
+            if (!store_secret_bytes_cached(
+                    pinned_ca_certificate_der_secret().name,
+                    pinned_ca_certificate_der_secret().description,
+                    decision.trustedAgentCaCertificate(),
+                    result.error_message)) {
+                return result;
+            }
         }
 
         if (!validate_peer_list(decision.peerList(), result.error_message)) {
@@ -799,13 +1309,14 @@ security_materials::operation_result security_materials::finalize_enrollment(
             return result;
         }
 
-        {
-            QProtobufSerializer serializer{};
-            const auto peer_list_bytes = decision.peerList().serialize(&serializer);
-            QSaveFile peer_list_file{app_paths_.peer_list_path()};
-            ensure_save_file_open(peer_list_file, QIODevice::WriteOnly | QIODevice::Truncate, QStringLiteral("Failed to open peer-list file"));
-            ensure_write(peer_list_file, peer_list_bytes, QStringLiteral("Failed to write peer-list file"));
-            ensure_commit(peer_list_file, QStringLiteral("Failed to commit peer-list file"));
+        QProtobufSerializer serializer{};
+        const auto peer_list_bytes = decision.peerList().serialize(&serializer);
+        if (!store_secret_bytes_cached(
+                peer_list_secret_definition.name,
+                peer_list_secret_definition.description,
+                peer_list_bytes,
+                result.error_message)) {
+            return result;
         }
 
         result.success = true;
@@ -829,16 +1340,15 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
     const pending_enrollment_request &request,
     QString &error_message) const
 {
-    shared::v1::EnrollmentDecision decision{};
-
-    QTemporaryDir temporary_dir{};
-    if (!temporary_dir.isValid()) {
-        error_message = QStringLiteral("Failed to create temporary directory for certificate signing");
-        return decision;
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        error_message = runtime_result.error_message;
+        return {};
     }
 
-    const auto certificate_der_path = temporary_dir.filePath(QStringLiteral("peer-cert.der"));
-    const auto certificate_pem_path = temporary_dir.filePath(QStringLiteral("peer-cert.pem"));
+    shared::v1::EnrollmentDecision decision{};
+    QByteArray certificate_der_bytes{};
+    QByteArray certificate_pem_bytes{};
 
     try {
         const auto csr = load_csr_der(
@@ -853,11 +1363,23 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
             QStringLiteral("Failed to verify enrollment CSR signature"));
 
         const auto ca_key = load_private_key(
-            app_paths_.ca_key_path(),
+            load_secret_bytes_cached(
+                ca_key_secret().name,
+                ca_key_secret().description,
+                error_message),
             QStringLiteral("Failed to load trusted-agent CA private key"));
-        const auto ca_certificate = load_certificate(
-            app_paths_.ca_certificate_path(),
+        if (!error_message.isEmpty()) {
+            return decision;
+        }
+        const auto ca_certificate = load_certificate_any_format(
+            load_secret_bytes_cached(
+                ca_certificate_secret().name,
+                ca_certificate_secret().description,
+                error_message),
             QStringLiteral("Failed to load trusted-agent CA certificate"));
+        if (!error_message.isEmpty()) {
+            return decision;
+        }
 
         x509_ptr certificate{X509_new(), X509_free};
         if (certificate == nullptr) {
@@ -868,7 +1390,7 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
             X509_set_version(certificate.get(), 2L) == 1,
             QStringLiteral("Failed to set enrollment certificate version"));
         const auto serial = make_asn1_serial(
-            next_certificate_serial(app_paths_.ca_serial_path()),
+            next_certificate_serial(),
             QStringLiteral("Failed to create enrollment certificate serial"));
         ensure_openssl_success(
             X509_set_serialNumber(certificate.get(), serial.get()) == 1,
@@ -905,21 +1427,17 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
             X509_sign(certificate.get(), ca_key.get(), EVP_sha256()) > 0,
             QStringLiteral("Failed to sign enrollment certificate"));
 
-        write_x509_pem(
-            certificate.get(),
-            certificate_pem_path,
-            QStringLiteral("Failed to write enrollment certificate PEM"));
-        write_x509_der(
-            certificate.get(),
-            certificate_der_path,
-            QStringLiteral("Failed to write enrollment certificate DER"));
+        certificate_pem_bytes =
+            x509_to_pem(certificate.get(), QStringLiteral("Failed to serialize enrollment certificate PEM"));
+        certificate_der_bytes =
+            x509_to_der(certificate.get(), QStringLiteral("Failed to serialize enrollment certificate DER"));
     } catch (const std::exception &exception) {
         error_message = QString::fromUtf8(exception.what());
         return decision;
     }
 
     QString issued_fingerprint_error{};
-    const auto issued_fingerprint = certificate_fingerprint(certificate_pem_path, issued_fingerprint_error);
+    const auto issued_fingerprint = certificate_fingerprint(certificate_pem_bytes, issued_fingerprint_error);
     if (issued_fingerprint.isEmpty()) {
         error_message = issued_fingerprint_error.isEmpty()
             ? QStringLiteral("Failed to derive issued enrollment certificate fingerprint")
@@ -930,13 +1448,12 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
     qCInfo(shared_security_materials_log)
         << "Issued enrollment certificate"
         << "peer_id=" << request.peer_id
-        << "fingerprint=" << issued_fingerprint
-        << "certificate_path=" << certificate_pem_path;
+        << "fingerprint=" << issued_fingerprint;
 
     auto peer_list = create_or_update_peer_list(
         configuration,
         &request,
-        certificate_pem_path,
+        certificate_pem_bytes,
         error_message);
     if (!error_message.isEmpty()) {
         return decision;
@@ -946,12 +1463,9 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
         return decision;
     }
 
-    QFile certificate_file{certificate_der_path};
-    ensure_file_open(certificate_file, QIODevice::ReadOnly, QStringLiteral("Failed to open signed certificate file"));
-
     decision.setApproved(true);
     decision.setMessage(QStringLiteral("Enrollment approved"));
-    decision.setSignedCertificate(certificate_file.readAll());
+    decision.setSignedCertificate(certificate_der_bytes);
     decision.setPeerList(peer_list);
     decision.setTrustedAgentCaCertificate(current_ca_certificate_der());
     return decision;
@@ -960,17 +1474,79 @@ shared::v1::EnrollmentDecision security_materials::build_approved_decision(
 QString security_materials::current_server_enrollment_fingerprint() const
 {
     QString error_message{};
-    return format_enrollment_fingerprint(enrollment_fingerprint(app_paths_.server_certificate_path(), error_message));
+    return format_enrollment_fingerprint(enrollment_fingerprint(current_server_certificate_pem(error_message), error_message));
 }
 
 QByteArray security_materials::current_ca_certificate_der() const
 {
     QString error_message{};
-    return certificate_der(app_paths_.ca_certificate_path(), error_message);
+    return certificate_der(current_ca_certificate_pem(error_message), error_message);
+}
+
+QByteArray security_materials::current_ca_certificate_pem(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        ca_certificate_secret().name,
+        ca_certificate_secret().description,
+        error_message);
+}
+
+QByteArray security_materials::current_peer_certificate_pem(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        peer_certificate_secret().name,
+        peer_certificate_secret().description,
+        error_message);
+}
+
+QByteArray security_materials::current_peer_private_key_pem(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        peer_key_secret().name,
+        peer_key_secret().description,
+        error_message);
+}
+
+QByteArray security_materials::current_server_certificate_pem(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        server_certificate_secret().name,
+        server_certificate_secret().description,
+        error_message);
+}
+
+QByteArray security_materials::current_server_private_key_pem(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        server_key_secret().name,
+        server_key_secret().description,
+        error_message);
+}
+
+QByteArray security_materials::current_pinned_trusted_agent_ca_certificate_der(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        pinned_ca_certificate_der_secret().name,
+        pinned_ca_certificate_der_secret().description,
+        error_message);
+}
+
+QByteArray security_materials::current_x25519_private_key_pem(QString &error_message) const
+{
+    return load_secret_bytes_cached(
+        x25519_key_secret().name,
+        x25519_key_secret().description,
+        error_message);
 }
 
 shared::v1::PeerList security_materials::current_peer_list(QString &error_message) const
 {
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        error_message = runtime_result.error_message;
+        return {};
+    }
+
     return load_peer_list(error_message);
 }
 
@@ -978,13 +1554,19 @@ security_materials::peer_list_update_result security_materials::store_peer_list_
     const shared::v1::PeerList &peer_list) const
 {
     peer_list_update_result result{};
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        result.error_message = runtime_result.error_message;
+        return result;
+    }
+
     if (!validate_peer_list(peer_list, result.error_message)) {
         return result;
     }
 
     QString current_error{};
     const auto current_peer_list = load_peer_list(current_error);
-    if (!current_error.isEmpty() && QFile::exists(app_paths_.peer_list_path())) {
+    if (!current_error.isEmpty()) {
         result.error_message = current_error;
         return result;
     }
@@ -1020,6 +1602,12 @@ security_materials::operation_result security_materials::remove_peer_from_curren
     const QString &peer_id) const
 {
     operation_result result{};
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        result.error_message = runtime_result.error_message;
+        return result;
+    }
+
     const auto normalized_peer_id = peer_id.trimmed();
     if (configuration.role != agent_role::local_trusted_agent) {
         result.error_message = QStringLiteral("Only the trusted agent can remove authorized peers");
@@ -1108,6 +1696,12 @@ bool security_materials::validate_peer_list(
     const shared::v1::PeerList &peer_list,
     QString &error_message) const
 {
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        error_message = runtime_result.error_message;
+        return false;
+    }
+
     if (peer_list.version() == 0) {
         error_message = QStringLiteral("Peer list must have a non-zero version");
         return false;
@@ -1128,17 +1722,11 @@ bool security_materials::validate_peer_list(
     }
 
     QByteArray authority_certificate_der{};
-    try {
-        if (QFile::exists(app_paths_.ca_certificate_path())) {
-            authority_certificate_der = certificate_der(app_paths_.ca_certificate_path(), error_message);
-        } else {
-            authority_certificate_der = read_file_bytes(
-                app_paths_.pinned_trusted_agent_ca_certificate_path(),
-                QStringLiteral("Failed to open pinned trusted-agent CA certificate"));
-        }
-    } catch (const std::exception &exception) {
-        error_message = QString::fromUtf8(exception.what());
-        return false;
+    const auto local_ca_pem = current_ca_certificate_pem(error_message);
+    if (!local_ca_pem.isEmpty()) {
+        authority_certificate_der = certificate_der(local_ca_pem, error_message);
+    } else if (error_message.isEmpty()) {
+        authority_certificate_der = current_pinned_trusted_agent_ca_certificate_der(error_message);
     }
 
     if (authority_certificate_der.isEmpty()) {
@@ -1161,6 +1749,12 @@ bool security_materials::is_known_peer_identity(
     const QString &certificate_fingerprint_sha256,
     QString &error_message) const
 {
+    const auto runtime_result = ensure_runtime_materials();
+    if (!runtime_result.success) {
+        error_message = runtime_result.error_message;
+        return false;
+    }
+
     const auto peer_list = load_peer_list(error_message);
     if (!error_message.isEmpty()) {
         return false;
@@ -1237,237 +1831,30 @@ QString security_materials::format_enrollment_fingerprint(const QString &value)
     return format_short_hex_groups(normalized);
 }
 
-bool security_materials::generate_ec_private_key(const QString &path, QString &error_message) const
-{
-    try {
-        const auto key = generate_private_key(
-            "EC",
-            "prime256v1",
-            QStringLiteral("Failed to generate EC private key"));
-        write_private_key_pem(key.get(), path, QStringLiteral("Failed to write EC private key"));
-        return true;
-    } catch (const std::exception &exception) {
-        error_message = QString::fromUtf8(exception.what());
-        return false;
-    }
-}
-
-bool security_materials::generate_x25519_private_key(const QString &path, QString &error_message) const
-{
-    try {
-        const auto key = generate_private_key(
-            "X25519",
-            nullptr,
-            QStringLiteral("Failed to generate X25519 private key"));
-        write_private_key_pem(key.get(), path, QStringLiteral("Failed to write X25519 private key"));
-        return true;
-    } catch (const std::exception &exception) {
-        error_message = QString::fromUtf8(exception.what());
-        return false;
-    }
-}
-
-bool security_materials::generate_self_signed_ca(QString &error_message) const
-{
-    try {
-        const auto key = load_private_key(
-            app_paths_.ca_key_path(),
-            QStringLiteral("Failed to load CA private key"));
-        x509_ptr certificate{X509_new(), X509_free};
-        if (certificate == nullptr) {
-            throw_security_error(QStringLiteral("Failed to allocate CA certificate"));
-        }
-
-        ensure_openssl_success(
-            X509_set_version(certificate.get(), 2L) == 1,
-            QStringLiteral("Failed to set CA certificate version"));
-        const auto serial = make_asn1_serial(1, QStringLiteral("Failed to create CA certificate serial"));
-        ensure_openssl_success(
-            X509_set_serialNumber(certificate.get(), serial.get()) == 1,
-            QStringLiteral("Failed to assign CA certificate serial"));
-        set_certificate_validity(certificate.get(), QStringLiteral("Failed to set CA certificate validity"));
-
-        auto *subject = X509_get_subject_name(certificate.get());
-        if (subject == nullptr) {
-            throw_security_error(QStringLiteral("Failed to get CA certificate subject"));
-        }
-        set_subject_common_name(
-            subject,
-            QStringLiteral("shared-trusted-agent-ca"),
-            QStringLiteral("Failed to set CA certificate subject"));
-        ensure_openssl_success(
-            X509_set_issuer_name(certificate.get(), subject) == 1,
-            QStringLiteral("Failed to set CA certificate issuer"));
-        ensure_openssl_success(
-            X509_set_pubkey(certificate.get(), key.get()) == 1,
-            QStringLiteral("Failed to set CA certificate public key"));
-        add_extension(
-            certificate.get(),
-            certificate.get(),
-            NID_basic_constraints,
-            "critical,CA:TRUE",
-            QStringLiteral("Failed to configure CA certificate basic constraints"));
-        add_extension(
-            certificate.get(),
-            certificate.get(),
-            NID_key_usage,
-            "critical,keyCertSign,cRLSign",
-            QStringLiteral("Failed to configure CA certificate key usage"));
-        add_extension(
-            certificate.get(),
-            certificate.get(),
-            NID_subject_key_identifier,
-            "hash",
-            QStringLiteral("Failed to configure CA certificate subject key identifier"));
-        ensure_openssl_success(
-            X509_sign(certificate.get(), key.get(), EVP_sha256()) > 0,
-            QStringLiteral("Failed to self-sign CA certificate"));
-
-        write_x509_pem(
-            certificate.get(),
-            app_paths_.ca_certificate_path(),
-            QStringLiteral("Failed to write CA certificate"));
-        return true;
-    } catch (const std::exception &exception) {
-        error_message = QString::fromUtf8(exception.what());
-        return false;
-    }
-}
-
-bool security_materials::generate_signed_certificate(
-    const QString &key_path,
-    const QString &certificate_path,
-    const QString &certificate_der_path,
-    const QString &subject_common_name,
-    QString &error_message,
-    const QString &csr_der_path) const
-{
-    try {
-        const auto leaf_key = load_private_key(key_path, QStringLiteral("Failed to load leaf private key"));
-        const auto request = create_certificate_request(
-            leaf_key.get(),
-            subject_common_name,
-            QStringLiteral("Failed to create certificate request"));
-
-        if (!csr_der_path.isEmpty()) {
-            write_csr_der(
-                request.get(),
-                csr_der_path,
-                QStringLiteral("Failed to write certificate request"));
-        }
-
-        evp_pkey_ptr request_public_key{X509_REQ_get_pubkey(request.get()), EVP_PKEY_free};
-        if (request_public_key == nullptr) {
-            throw_security_error(QStringLiteral("Failed to extract certificate request public key"));
-        }
-
-        const auto ca_key = load_private_key(
-            app_paths_.ca_key_path(),
-            QStringLiteral("Failed to load CA private key for certificate signing"));
-        const auto ca_certificate = load_certificate(
-            app_paths_.ca_certificate_path(),
-            QStringLiteral("Failed to load CA certificate for certificate signing"));
-
-        x509_ptr certificate{X509_new(), X509_free};
-        if (certificate == nullptr) {
-            throw_security_error(QStringLiteral("Failed to allocate signed certificate"));
-        }
-
-        ensure_openssl_success(
-            X509_set_version(certificate.get(), 2L) == 1,
-            QStringLiteral("Failed to set signed certificate version"));
-        const auto serial = make_asn1_serial(
-            next_certificate_serial(app_paths_.ca_serial_path()),
-            QStringLiteral("Failed to create signed certificate serial"));
-        ensure_openssl_success(
-            X509_set_serialNumber(certificate.get(), serial.get()) == 1,
-            QStringLiteral("Failed to assign signed certificate serial"));
-        set_certificate_validity(certificate.get(), QStringLiteral("Failed to set signed certificate validity"));
-        ensure_openssl_success(
-            X509_set_issuer_name(certificate.get(), X509_get_subject_name(ca_certificate.get())) == 1,
-            QStringLiteral("Failed to set signed certificate issuer"));
-        ensure_openssl_success(
-            X509_set_subject_name(certificate.get(), X509_REQ_get_subject_name(request.get())) == 1,
-            QStringLiteral("Failed to set signed certificate subject"));
-        ensure_openssl_success(
-            X509_set_pubkey(certificate.get(), request_public_key.get()) == 1,
-            QStringLiteral("Failed to set signed certificate public key"));
-        add_extension(
-            certificate.get(),
-            ca_certificate.get(),
-            NID_basic_constraints,
-            "critical,CA:FALSE",
-            QStringLiteral("Failed to configure signed certificate basic constraints"));
-        add_extension(
-            certificate.get(),
-            ca_certificate.get(),
-            NID_key_usage,
-            "critical,digitalSignature,keyAgreement",
-            QStringLiteral("Failed to configure signed certificate key usage"));
-        add_extension(
-            certificate.get(),
-            ca_certificate.get(),
-            NID_ext_key_usage,
-            "serverAuth,clientAuth",
-            QStringLiteral("Failed to configure signed certificate extended key usage"));
-        ensure_openssl_success(
-            X509_sign(certificate.get(), ca_key.get(), EVP_sha256()) > 0,
-            QStringLiteral("Failed to sign certificate"));
-
-        write_x509_pem(
-            certificate.get(),
-            certificate_path,
-            QStringLiteral("Failed to write signed certificate PEM"));
-        write_x509_der(
-            certificate.get(),
-            certificate_der_path,
-            QStringLiteral("Failed to write signed certificate DER"));
-        return true;
-    } catch (const std::exception &exception) {
-        error_message = QString::fromUtf8(exception.what());
-        return false;
-    }
-}
-
 bool security_materials::write_peer_list(const shared::v1::PeerList &peer_list, QString &error_message) const
 {
     QProtobufSerializer serializer{};
     const auto bytes = peer_list.serialize(&serializer);
-    QSaveFile file{app_paths_.peer_list_path()};
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        error_message = QStringLiteral("Failed to open peer-list file");
-        return false;
-    }
-
-    if (file.write(bytes) != bytes.size()) {
-        error_message = QStringLiteral("Failed to write peer-list file");
-        qCCritical(shared_security_materials_log) << error_message << file.errorString();
-        return false;
-    }
-    if (!file.commit()) {
-        error_message = QStringLiteral("Failed to commit peer-list file");
-        qCCritical(shared_security_materials_log) << error_message << file.errorString();
-        return false;
-    }
-
-    return true;
+    return store_secret_bytes_cached(
+        peer_list_secret_definition.name,
+        peer_list_secret_definition.description,
+        bytes,
+        error_message);
 }
 
 shared::v1::PeerList security_materials::load_peer_list(QString &error_message) const
 {
     shared::v1::PeerList peer_list{};
-    QFile file{app_paths_.peer_list_path()};
-    if (!file.exists()) {
-        return peer_list;
-    }
-
-    if (!file.open(QIODevice::ReadOnly)) {
-        error_message = QStringLiteral("Failed to open peer-list file");
+    const auto bytes = load_secret_bytes_cached(
+        peer_list_secret_definition.name,
+        peer_list_secret_definition.description,
+        error_message);
+    if (bytes.isEmpty()) {
         return peer_list;
     }
 
     QProtobufSerializer serializer{};
-    if (!peer_list.deserialize(&serializer, file.readAll())) {
+    if (!peer_list.deserialize(&serializer, bytes)) {
         error_message = QStringLiteral("Failed to deserialize peer-list");
     }
 
@@ -1477,11 +1864,11 @@ shared::v1::PeerList security_materials::load_peer_list(QString &error_message) 
 shared::v1::PeerList security_materials::create_or_update_peer_list(
     const agent_configuration &configuration,
     const pending_enrollment_request *request,
-    const QString &request_certificate_path,
+    const QByteArray &request_certificate_pem,
     QString &error_message) const
 {
     auto current_peer_list = load_peer_list(error_message);
-    if (!error_message.isEmpty() && QFile::exists(app_paths_.peer_list_path())) {
+    if (!error_message.isEmpty()) {
         return current_peer_list;
     }
     error_message.clear();
@@ -1511,8 +1898,8 @@ shared::v1::PeerList security_materials::create_or_update_peer_list(
     }
 
     if (request != nullptr) {
-        if (request_certificate_path.isEmpty()) {
-            error_message = QStringLiteral("Issued request certificate path is required");
+        if (request_certificate_pem.isEmpty()) {
+            error_message = QStringLiteral("Issued request certificate is required");
             return {};
         }
 
@@ -1520,13 +1907,13 @@ shared::v1::PeerList security_materials::create_or_update_peer_list(
         auto updated = false;
         for (auto &entry : entries) {
             if (entry.identity().peerId().uuid() == request->peer_id) {
-                entry = peer_list_entry_for_request(*request, request_certificate_path, error_message);
+                entry = peer_list_entry_for_request(*request, request_certificate_pem, error_message);
                 updated = true;
                 break;
             }
         }
         if (!updated) {
-            entries.append(peer_list_entry_for_request(*request, request_certificate_path, error_message));
+            entries.append(peer_list_entry_for_request(*request, request_certificate_pem, error_message));
         }
         if (!error_message.isEmpty()) {
             return {};
@@ -1563,8 +1950,14 @@ QByteArray security_materials::sign_peer_list_payload(
 
     try {
         const auto key = load_private_key(
-            app_paths_.ca_key_path(),
+            load_secret_bytes_cached(
+                ca_key_secret().name,
+                ca_key_secret().description,
+                error_message),
             QStringLiteral("Failed to load CA private key for peer-list signing"));
+        if (!error_message.isEmpty()) {
+            return {};
+        }
         evp_md_ctx_ptr context{EVP_MD_CTX_new(), EVP_MD_CTX_free};
         if (context == nullptr) {
             throw_security_error(QStringLiteral("Failed to allocate peer-list signing context"));
@@ -1597,17 +1990,14 @@ QByteArray security_materials::sign_peer_list_payload(
     }
 }
 
-QByteArray security_materials::raw_x25519_public_key(const QString &private_key_path, QString &error_message) const
+QByteArray security_materials::raw_x25519_public_key(const QByteArray &private_key_pem, QString &error_message) const
 {
-    QFile file{private_key_path};
-    if (!file.open(QIODevice::ReadOnly)) {
-        error_message = QStringLiteral("Failed to open X25519 private key");
-        qCCritical(shared_security_materials_log) << error_message << file.errorString();
+    if (private_key_pem.isEmpty()) {
+        error_message = QStringLiteral("X25519 private key is unavailable");
         return {};
     }
 
-    const auto pem_data = file.readAll();
-    BIO *bio = BIO_new_mem_buf(pem_data.constData(), static_cast<int>(pem_data.size()));
+    BIO *bio = BIO_new_mem_buf(private_key_pem.constData(), static_cast<int>(private_key_pem.size()));
     if (bio == nullptr) {
         error_message = QStringLiteral("Failed to create OpenSSL BIO for X25519 key");
         return {};
@@ -1636,9 +2026,9 @@ QByteArray security_materials::raw_x25519_public_key(const QString &private_key_
     return public_key;
 }
 
-QString security_materials::certificate_fingerprint(const QString &certificate_path, QString &error_message) const
+QString security_materials::certificate_fingerprint(const QByteArray &certificate_bytes, QString &error_message) const
 {
-    const auto der = certificate_der(certificate_path, error_message);
+    const auto der = certificate_der(certificate_bytes, error_message);
     if (der.isEmpty()) {
         return {};
     }
@@ -1646,9 +2036,9 @@ QString security_materials::certificate_fingerprint(const QString &certificate_p
     return QString::fromLatin1(QCryptographicHash::hash(der, QCryptographicHash::Sha256).toHex());
 }
 
-QString security_materials::enrollment_fingerprint(const QString &certificate_path, QString &error_message) const
+QString security_materials::enrollment_fingerprint(const QByteArray &certificate_bytes, QString &error_message) const
 {
-    const auto full_fingerprint = certificate_fingerprint(certificate_path, error_message);
+    const auto full_fingerprint = certificate_fingerprint(certificate_bytes, error_message);
     if (full_fingerprint.isEmpty()) {
         return {};
     }
@@ -1656,20 +2046,22 @@ QString security_materials::enrollment_fingerprint(const QString &certificate_pa
     return full_fingerprint.left(8);
 }
 
-QByteArray security_materials::certificate_der(const QString &certificate_path, QString &error_message) const
+QByteArray security_materials::certificate_der(const QByteArray &certificate_bytes, QString &error_message) const
 {
-    const auto certificate = load_certificate_from_path(certificate_path);
+    const auto certificates = QSslCertificate::fromData(certificate_bytes);
+    const auto certificate = certificates.isEmpty() ? QSslCertificate{} : certificates.first();
     if (certificate.isNull()) {
-        error_message = QStringLiteral("Failed to load certificate from %1").arg(certificate_path);
+        error_message = QStringLiteral("Failed to parse certificate");
         return {};
     }
 
     return certificate.toDer();
 }
 
-qint64 security_materials::certificate_not_before_ms(const QString &certificate_path, QString &error_message) const
+qint64 security_materials::certificate_not_before_ms(const QByteArray &certificate_bytes, QString &error_message) const
 {
-    const auto certificate = load_certificate_from_path(certificate_path);
+    const auto certificates = QSslCertificate::fromData(certificate_bytes);
+    const auto certificate = certificates.isEmpty() ? QSslCertificate{} : certificates.first();
     if (certificate.isNull()) {
         error_message = QStringLiteral("Failed to load certificate validity");
         return {};
@@ -1678,9 +2070,10 @@ qint64 security_materials::certificate_not_before_ms(const QString &certificate_
     return to_epoch_ms(certificate.effectiveDate());
 }
 
-qint64 security_materials::certificate_not_after_ms(const QString &certificate_path, QString &error_message) const
+qint64 security_materials::certificate_not_after_ms(const QByteArray &certificate_bytes, QString &error_message) const
 {
-    const auto certificate = load_certificate_from_path(certificate_path);
+    const auto certificates = QSslCertificate::fromData(certificate_bytes);
+    const auto certificate = certificates.isEmpty() ? QSslCertificate{} : certificates.first();
     if (certificate.isNull()) {
         error_message = QStringLiteral("Failed to load certificate validity");
         return {};
@@ -1712,17 +2105,25 @@ shared::v1::PeerListEntry security_materials::local_peer_list_entry(
     identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
 
     entry.setIdentity(identity);
-    entry.setCertificateFingerprintSha256(certificate_fingerprint(app_paths_.peer_certificate_path(), error_message));
-    entry.setCertificateNotBeforeMs(certificate_not_before_ms(app_paths_.peer_certificate_path(), error_message));
-    entry.setCertificateNotAfterMs(certificate_not_after_ms(app_paths_.peer_certificate_path(), error_message));
-    entry.setX25519PublicKey(raw_x25519_public_key(app_paths_.x25519_private_key_path(), error_message));
+    const auto certificate_pem = current_peer_certificate_pem(error_message);
+    if (!error_message.isEmpty()) {
+        return entry;
+    }
+    const auto x25519_private_key_pem = current_x25519_private_key_pem(error_message);
+    if (!error_message.isEmpty()) {
+        return entry;
+    }
+    entry.setCertificateFingerprintSha256(certificate_fingerprint(certificate_pem, error_message));
+    entry.setCertificateNotBeforeMs(certificate_not_before_ms(certificate_pem, error_message));
+    entry.setCertificateNotAfterMs(certificate_not_after_ms(certificate_pem, error_message));
+    entry.setX25519PublicKey(raw_x25519_public_key(x25519_private_key_pem, error_message));
 
     return entry;
 }
 
 shared::v1::PeerListEntry security_materials::peer_list_entry_for_request(
     const pending_enrollment_request &request,
-    const QString &certificate_path,
+    const QByteArray &certificate_pem,
     QString &error_message) const
 {
     shared::v1::PeerListEntry entry{};
@@ -1734,9 +2135,9 @@ shared::v1::PeerListEntry security_materials::peer_list_entry_for_request(
     identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
 
     entry.setIdentity(identity);
-    entry.setCertificateFingerprintSha256(certificate_fingerprint(certificate_path, error_message));
-    entry.setCertificateNotBeforeMs(certificate_not_before_ms(certificate_path, error_message));
-    entry.setCertificateNotAfterMs(certificate_not_after_ms(certificate_path, error_message));
+    entry.setCertificateFingerprintSha256(certificate_fingerprint(certificate_pem, error_message));
+    entry.setCertificateNotBeforeMs(certificate_not_before_ms(certificate_pem, error_message));
+    entry.setCertificateNotAfterMs(certificate_not_after_ms(certificate_pem, error_message));
     entry.setX25519PublicKey(request.x25519_public_key);
 
     return entry;
