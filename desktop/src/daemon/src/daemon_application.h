@@ -77,6 +77,7 @@ private slots:
     void reload_configuration();
 
 private:
+    [[nodiscard]] bool reload_configuration_impl();
     [[nodiscard]] bool configurations_match(
         const core::agent_configuration &left,
         const core::agent_configuration &right) const;

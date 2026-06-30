@@ -40,7 +40,9 @@ bool daemon_application::start()
     }
     qCInfo(shared_daemon_log) << "clipboard limit bytes:" << settings_repository_.clipboard_limit_bytes();
 
-    reload_configuration();
+    if (!reload_configuration_impl()) {
+        return false;
+    }
     configuration_reload_timer_.start();
 
     return true;
@@ -49,7 +51,7 @@ bool daemon_application::start()
 void daemon_application::apply_configuration_change()
 {
     qCInfo(shared_daemon_log) << "configuration change notification received";
-    reload_configuration();
+    (void)reload_configuration_impl();
 }
 
 bool daemon_application::send_clipboard_text(
@@ -126,27 +128,54 @@ bool daemon_application::reject_file_transfer(
 
 void daemon_application::reload_configuration()
 {
+    (void)reload_configuration_impl();
+}
+
+bool daemon_application::reload_configuration_impl()
+{
     core::agent_configuration next_configuration{};
 
     try {
         next_configuration = configuration_repository_.load();
     } catch (const std::exception &exception) {
         qCCritical(shared_daemon_log) << "Failed to reload configuration:" << exception.what();
-        return;
+        return false;
     }
 
     if (configurations_match(configuration_, next_configuration)) {
-        return;
+        return true;
     }
 
-    configuration_ = next_configuration;
     qCInfo(shared_daemon_log) << "configuration changed:"
-                              << "initialized=" << configuration_.initialized
-                              << "role=" << static_cast<int>(configuration_.role)
-                              << "enrollment_host=" << configuration_.enrollment_host
-                              << "enrollment_port=" << configuration_.enrollment_port
-                              << "peer_host=" << configuration_.peer_host
-                              << "peer_port=" << configuration_.peer_port;
+                              << "initialized=" << next_configuration.initialized
+                              << "role=" << static_cast<int>(next_configuration.role)
+                              << "enrollment_host=" << next_configuration.enrollment_host
+                              << "enrollment_port=" << next_configuration.enrollment_port
+                              << "peer_host=" << next_configuration.peer_host
+                              << "peer_port=" << next_configuration.peer_port;
+
+    std::unique_ptr<enrollment_server> next_server{};
+    if (next_configuration.initialized
+        && next_configuration.role == core::agent_role::local_trusted_agent) {
+        QString error_message{};
+        next_server = std::make_unique<enrollment_server>(next_configuration, app_paths_);
+        if (!next_server->start(error_message)) {
+            qCCritical(shared_daemon_log) << "Failed to start enrollment server:" << error_message;
+            return false;
+        }
+    }
+
+    std::unique_ptr<peer_service> next_peer_service{};
+    if (next_configuration.initialized
+        && (next_configuration.role == core::agent_role::local_trusted_agent
+            || next_configuration.role == core::agent_role::peer)) {
+        QString error_message{};
+        next_peer_service = std::make_unique<peer_service>(next_configuration, app_paths_);
+        if (!next_peer_service->start(error_message)) {
+            qCCritical(shared_daemon_log) << "Failed to start peer service:" << error_message;
+            return false;
+        }
+    }
 
     if (enrollment_server_ != nullptr) {
         enrollment_server_->stop();
@@ -159,32 +188,17 @@ void daemon_application::reload_configuration()
         qCInfo(shared_daemon_log) << "stopped peer service";
     }
 
-    if (configuration_.initialized && configuration_.role == core::agent_role::local_trusted_agent) {
-        QString error_message{};
-        auto next_server = std::make_unique<enrollment_server>(configuration_, app_paths_);
-        if (!next_server->start(error_message)) {
-            qCCritical(shared_daemon_log) << "Failed to start enrollment server:" << error_message;
-            return;
-        }
-
-        enrollment_server_ = std::move(next_server);
+    configuration_ = next_configuration;
+    enrollment_server_ = std::move(next_server);
+    if (enrollment_server_ != nullptr) {
         qCInfo(shared_daemon_log)
             << "trusted-agent enrollment server listening on"
             << configuration_.enrollment_host
             << configuration_.enrollment_port;
     }
 
-    if (configuration_.initialized
-        && (configuration_.role == core::agent_role::local_trusted_agent
-            || configuration_.role == core::agent_role::peer)) {
-        QString error_message{};
-        auto next_peer_service = std::make_unique<peer_service>(configuration_, app_paths_);
-        if (!next_peer_service->start(error_message)) {
-            qCCritical(shared_daemon_log) << "Failed to start peer service:" << error_message;
-            return;
-        }
-
-        peer_service_ = std::move(next_peer_service);
+    peer_service_ = std::move(next_peer_service);
+    if (peer_service_ != nullptr) {
         connect(
             peer_service_.get(),
             &peer_service::clipboard_approval_requested,
@@ -217,6 +231,8 @@ void daemon_application::reload_configuration()
             &daemon_application::file_transfer_status);
         qCInfo(shared_daemon_log) << "peer service listening on" << configuration_.peer_host << configuration_.peer_port;
     }
+
+    return true;
 }
 
 bool daemon_application::configurations_match(
