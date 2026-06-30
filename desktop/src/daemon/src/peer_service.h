@@ -331,8 +331,8 @@ private:
     [[nodiscard]] bool peer_has_active_reachability_advertiser(const QString &peer_id) const;
     [[nodiscard]] QStringList direct_relay_candidates_for_peer(const QString &peer_id) const;
     [[nodiscard]] QCoro::Task<std::optional<QString>> resolve_relay_peer(
-        const QString &destination_peer_id,
-        const QString &transfer_id);
+        QString destination_peer_id,
+        QString transfer_id);
     [[nodiscard]] QByteArray serialize_inner_envelope(const shared::v1::Envelope &envelope) const;
     [[nodiscard]] bool deserialize_inner_envelope(
         const QByteArray &bytes,
@@ -370,7 +370,7 @@ private:
     void enqueue_frame(QSslSocket *socket, outbound_frame frame);
     [[nodiscard]] std::optional<outbound_frame> take_next_frame(QSslSocket *socket);
     void start_outgoing_file_transfer(const QString &transfer_id);
-    [[nodiscard]] QCoro::Task<> run_outgoing_file_transfer(const QString &transfer_id);
+    [[nodiscard]] QCoro::Task<> run_outgoing_file_transfer(QString transfer_id);
     void emit_transfer_status(
         const QString &transfer_id,
         const QString &peer_id,

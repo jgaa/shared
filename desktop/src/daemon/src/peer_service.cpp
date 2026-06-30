@@ -15,6 +15,7 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QMimeDatabase>
+#include <QtCore/QPointer>
 #include <QtCore/QRandomGenerator>
 #include <QtCore/QSaveFile>
 #include <QtCore/QStandardPaths>
@@ -3234,8 +3235,8 @@ QStringList peer_service::direct_relay_candidates_for_peer(const QString &peer_i
 }
 
 QCoro::Task<std::optional<QString>> peer_service::resolve_relay_peer(
-    const QString &destination_peer_id,
-    const QString &transfer_id)
+    QString destination_peer_id,
+    QString transfer_id)
 {
     const auto relay_candidates = direct_relay_candidates_for_peer(destination_peer_id);
     if (relay_candidates.isEmpty()) {
@@ -3775,31 +3776,50 @@ void peer_service::ensure_socket_draining(QSslSocket *socket)
 
 QCoro::Task<> peer_service::drain_socket_queue(QSslSocket *socket)
 {
-    while (socket != nullptr && sessions_.contains(socket) && socket_send_states_.contains(socket)) {
-        auto next_frame = take_next_frame(socket);
+    QPointer<QSslSocket> guarded_socket{socket};
+
+    while (!guarded_socket.isNull()
+           && sessions_.contains(guarded_socket.get())
+           && socket_send_states_.contains(guarded_socket.get())) {
+        auto next_frame = take_next_frame(guarded_socket.get());
         if (!next_frame.has_value()) {
             break;
         }
 
-        while (socket->bytesToWrite() >= socket_backlog_limit_bytes) {
-            const auto flushed = co_await qCoro(static_cast<QIODevice *>(socket)).waitForBytesWritten(std::chrono::seconds{5});
+        while (!guarded_socket.isNull()
+               && guarded_socket->bytesToWrite() >= socket_backlog_limit_bytes) {
+            const auto flushed = co_await qCoro(static_cast<QIODevice *>(guarded_socket.get()))
+                                     .waitForBytesWritten(std::chrono::seconds{5});
+            if (guarded_socket.isNull()
+                || !sessions_.contains(guarded_socket.get())
+                || !socket_send_states_.contains(guarded_socket.get())) {
+                co_return;
+            }
             if (!flushed.has_value()) {
                 qCCritical(shared_peer_service_log) << "Timed out waiting for socket backlog to drain";
-                close_socket(socket, QStringLiteral("Timed out waiting for transfer backlog"));
+                close_socket(guarded_socket.get(), QStringLiteral("Timed out waiting for transfer backlog"));
                 co_return;
             }
         }
 
-        if (socket->write(next_frame->bytes) != next_frame->bytes.size()) {
-            qCCritical(shared_peer_service_log) << "Failed to queue" << next_frame->context << socket->errorString();
-            close_socket(socket, QStringLiteral("Failed to queue %1").arg(next_frame->context));
+        if (guarded_socket.isNull()
+            || guarded_socket->write(next_frame->bytes) != next_frame->bytes.size()) {
+            qCCritical(shared_peer_service_log)
+                << "Failed to queue"
+                << next_frame->context
+                << (guarded_socket.isNull() ? QStringLiteral("Socket was destroyed")
+                                            : guarded_socket->errorString());
+            close_socket(guarded_socket.get(), QStringLiteral("Failed to queue %1").arg(next_frame->context));
             co_return;
         }
-        if (!socket->flush()) {
-            qCWarning(shared_peer_service_log) << "Failed to flush" << next_frame->context << socket->errorString();
+        if (!guarded_socket->flush()) {
+            qCWarning(shared_peer_service_log)
+                << "Failed to flush"
+                << next_frame->context
+                << guarded_socket->errorString();
         }
 
-        emit socket_queue_progressed(socket);
+        emit socket_queue_progressed(guarded_socket.get());
     }
 }
 
@@ -3881,18 +3901,18 @@ void peer_service::start_outgoing_file_transfer(const QString &transfer_id)
         });
 }
 
-QCoro::Task<> peer_service::run_outgoing_file_transfer(const QString &transfer_id)
+QCoro::Task<> peer_service::run_outgoing_file_transfer(QString transfer_id)
 {
     auto transfer_it = outgoing_file_transfers_.find(transfer_id);
     if (transfer_it == outgoing_file_transfers_.end()) {
         co_return;
     }
 
-    auto *socket = authenticated_socket_for_peer(
+    QPointer<QSslSocket> socket{authenticated_socket_for_peer(
         transfer_it->relay_peer_id.isEmpty()
             ? transfer_it->recipient_peer_id
-            : transfer_it->relay_peer_id);
-    if (socket == nullptr) {
+            : transfer_it->relay_peer_id)};
+    if (socket.isNull()) {
         emit_file_transfer_status(
             transfer_id,
             transfer_it->recipient_peer_id,
@@ -3914,8 +3934,17 @@ QCoro::Task<> peer_service::run_outgoing_file_transfer(const QString &transfer_i
     }
 
     for (quint64 chunk_index = 0, offset = 0; !file.atEnd(); ++chunk_index) {
-        while (queued_bytes_for_socket(socket) >= transfer_queue_limit_bytes) {
+        while (!socket.isNull() && queued_bytes_for_socket(socket.get()) >= transfer_queue_limit_bytes) {
             const auto result = co_await qCoro(this, &peer_service::socket_queue_progressed, std::chrono::seconds{5});
+            if (socket.isNull()) {
+                emit_file_transfer_status(
+                    transfer_id,
+                    transfer_it->recipient_peer_id,
+                    transfer_it->recipient_name,
+                    shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                    QStringLiteral("Recipient is no longer connected"));
+                co_return;
+            }
             if (!result.has_value()) {
                 emit_file_transfer_status(
                     transfer_id,
@@ -3926,7 +3955,7 @@ QCoro::Task<> peer_service::run_outgoing_file_transfer(const QString &transfer_i
                 co_return;
             }
 
-            if (*result != socket) {
+            if (*result != socket.get()) {
                 continue;
             }
         }
