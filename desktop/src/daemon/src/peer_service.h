@@ -98,6 +98,7 @@ private slots:
 private:
     struct session_state {
         QByteArray buffer{};
+        QList<shared::v1::Envelope> pending_pre_auth_messages{};
         QString local_connection_id{};
         QString target_peer_id{};
         QString remote_peer_id{};
@@ -105,6 +106,7 @@ private:
         quint32 remote_peer_list_version{};
         quint16 remote_listen_port{};
         bool outbound{};
+        bool outbound_failure_recorded{};
         bool authenticated{};
         bool peer_info_sent{};
         bool peer_info_received{};
@@ -130,6 +132,11 @@ private:
         QString destination_peer_id{};
         QString transfer_id{};
         QHash<QString, who_has_reply_state> replies_by_relay_peer_id{};
+    };
+
+    struct outbound_retry_state {
+        quint32 consecutive_failures{};
+        qint64 next_attempt_time_ms{};
     };
 
     struct outgoing_clipboard_transfer {
@@ -231,6 +238,9 @@ private:
         outbound_priority priority = outbound_priority::normal);
     void note_peer_activity(QSslSocket *socket);
     void write_peer_status_snapshot();
+    void process_authenticated_envelope(
+        QSslSocket *socket,
+        const shared::v1::Envelope &envelope);
     void handle_socket_ready_read(QSslSocket *socket);
     void handle_encrypted(QSslSocket *socket);
     void handle_socket_error(QSslSocket *socket);
@@ -293,6 +303,11 @@ private:
         const shared::v1::PeerListEntry &peer,
         const QList<shared::v1::PeerAddress> &addresses);
     [[nodiscard]] bool has_session_for_peer(const QString &peer_id) const;
+    [[nodiscard]] bool is_outbound_attempt_deferred(
+        const QString &peer_id,
+        const QString &peer_name) const;
+    void note_outbound_connection_failure(const QString &peer_id);
+    void reset_outbound_connection_backoff(const QString &peer_id);
     [[nodiscard]] bool should_keep_session(
         const session_state &existing_session,
         const session_state &candidate_session,
@@ -402,6 +417,7 @@ private:
     QHash<QString, incoming_clipboard_transfer> incoming_clipboard_transfers_{};
     QHash<QString, incoming_file_transfer> incoming_file_transfers_{};
     QSet<QString> pending_connections_{};
+    QHash<QString, outbound_retry_state> outbound_retry_states_{};
     QTimer peer_list_refresh_timer_{};
     QTimer connect_timer_{};
     QTimer keepalive_timer_{};

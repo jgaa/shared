@@ -25,6 +25,7 @@
 #include <QtNetwork/QSslKey>
 #include <QtProtobuf/QProtobufSerializer>
 
+#include <algorithm>
 #include <limits>
 
 namespace shared::desktop::daemon {
@@ -42,6 +43,8 @@ constexpr auto address_hint_republish_interval_ms{30000};
 constexpr auto reachability_ttl_ms{90000};
 constexpr auto reachability_broadcast_min_delay_ms{500};
 constexpr auto reachability_broadcast_max_delay_ms{1500};
+constexpr qint64 outbound_retry_initial_delay_ms{5000};
+constexpr qint64 outbound_retry_max_delay_ms{5 * 60 * 1000};
 
 QString build_numbered_filename(const QString &base_name, const QString &suffix, int index)
 {
@@ -179,6 +182,7 @@ void peer_service::stop()
     sessions_.clear();
     socket_send_states_.clear();
     pending_connections_.clear();
+    outbound_retry_states_.clear();
     reachability_claims_by_target_.clear();
     pending_who_has_queries_.clear();
     for (auto it = incoming_clipboard_transfers_.begin(); it != incoming_clipboard_transfers_.end(); ++it) {
@@ -1109,7 +1113,20 @@ void peer_service::close_socket(QSslSocket *socket, const QString &reason)
         return;
     }
 
-    const auto session = sessions_.value(socket);
+    auto session_it = sessions_.find(socket);
+    if (session_it == sessions_.end()) {
+        return;
+    }
+
+    auto &session = session_it.value();
+    if (session.outbound
+        && !session.authenticated
+        && !session.target_peer_id.isEmpty()
+        && !session.outbound_failure_recorded) {
+        note_outbound_connection_failure(session.target_peer_id);
+        session.outbound_failure_recorded = true;
+    }
+
     if (session.outbound && !session.target_peer_id.isEmpty()) {
         pending_connections_.remove(session.target_peer_id);
     }
@@ -1497,97 +1514,114 @@ void peer_service::handle_socket_ready_read(QSslSocket *socket)
         if (envelope.hasPeerInfo()) {
             qCInfo(shared_peer_service_log) << "received peer-info" << envelope.messageId();
             handle_peer_info(socket, envelope.peerInfo());
+            session_it = sessions_.find(socket);
+            if (session_it == sessions_.end()) {
+                return;
+            }
             continue;
         }
 
         if (!session_it->authenticated) {
-            qCCritical(shared_peer_service_log) << "Received non-auth message before peer-info" << envelope.messageId();
-            close_socket(socket, QStringLiteral("Expected peer-info before other messages"));
+            qCWarning(shared_peer_service_log)
+                << "Deferring pre-auth peer message until peer-info arrives"
+                << envelope.messageId();
+            session_it->pending_pre_auth_messages.append(envelope);
+            if (session_it->pending_pre_auth_messages.size() > 32) {
+                close_socket(socket, QStringLiteral("Too many pre-auth messages before peer-info"));
+                return;
+            }
+            continue;
+        }
+
+        process_authenticated_envelope(socket, envelope);
+    }
+}
+
+void peer_service::process_authenticated_envelope(
+    QSslSocket *socket,
+    const shared::v1::Envelope &envelope)
+{
+    if (envelope.hasPeerList()) {
+        qCInfo(shared_peer_service_log) << "received peer-list" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_peer_list(socket, envelope.peerList());
+        return;
+    }
+
+    if (envelope.hasAddressHint()) {
+        qCInfo(shared_peer_service_log) << "received address-hint" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_address_hint(socket, envelope.addressHint());
+        return;
+    }
+
+    if (envelope.hasReachabilityAdvertisement()) {
+        qCInfo(shared_peer_service_log) << "received reachability-advertisement" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_reachability_advertisement(socket, envelope.reachabilityAdvertisement());
+        return;
+    }
+
+    if (envelope.hasRelayEnvelope()) {
+        qCInfo(shared_peer_service_log) << "received relay-envelope" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_relay_envelope(socket, envelope.relayEnvelope());
+        return;
+    }
+
+    if (envelope.hasWhoHas()) {
+        qCInfo(shared_peer_service_log) << "received who-has" << envelope.messageId() << envelope.requestId();
+        note_peer_activity(socket);
+        if (!envelope.hasRequestId() || envelope.requestId() == 0) {
+            qCWarning(shared_peer_service_log) << "Ignoring who-has without request id" << envelope.messageId();
             return;
         }
-
-        if (envelope.hasPeerList()) {
-            qCInfo(shared_peer_service_log) << "received peer-list" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_peer_list(socket, envelope.peerList());
-            continue;
-        }
-
-        if (envelope.hasAddressHint()) {
-            qCInfo(shared_peer_service_log) << "received address-hint" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_address_hint(socket, envelope.addressHint());
-            continue;
-        }
-
-        if (envelope.hasReachabilityAdvertisement()) {
-            qCInfo(shared_peer_service_log) << "received reachability-advertisement" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_reachability_advertisement(socket, envelope.reachabilityAdvertisement());
-            continue;
-        }
-
-        if (envelope.hasRelayEnvelope()) {
-            qCInfo(shared_peer_service_log) << "received relay-envelope" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_relay_envelope(socket, envelope.relayEnvelope());
-            continue;
-        }
-
-        if (envelope.hasWhoHas()) {
-            qCInfo(shared_peer_service_log) << "received who-has" << envelope.messageId() << envelope.requestId();
-            note_peer_activity(socket);
-            if (!envelope.hasRequestId() || envelope.requestId() == 0) {
-                qCWarning(shared_peer_service_log) << "Ignoring who-has without request id" << envelope.messageId();
-                continue;
-            }
-            handle_who_has(socket, envelope.requestId(), envelope.whoHas());
-            continue;
-        }
-
-        if (envelope.hasWhoHasReply()) {
-            qCInfo(shared_peer_service_log) << "received who-has-reply" << envelope.messageId() << envelope.requestId();
-            note_peer_activity(socket);
-            if (!envelope.hasRequestId() || envelope.requestId() == 0) {
-                qCWarning(shared_peer_service_log) << "Ignoring who-has reply without request id" << envelope.messageId();
-                continue;
-            }
-            handle_who_has_reply(socket, envelope.requestId(), envelope.whoHasReply());
-            continue;
-        }
-
-        if (envelope.hasKeepAlive()) {
-            qCInfo(shared_peer_service_log) << "received keep-alive" << envelope.messageId();
-            note_peer_activity(socket);
-            if (envelope.keepAlive().replyToTimeMs() == 0) {
-                send_keepalive(socket, envelope.keepAlive().timeMs());
-            }
-            continue;
-        }
-
-        if (envelope.hasTransferOffer()) {
-            qCInfo(shared_peer_service_log) << "received transfer-offer" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_transfer_offer(socket, envelope.transferOffer());
-            continue;
-        }
-
-        if (envelope.hasTransferStatus()) {
-            qCInfo(shared_peer_service_log) << "received transfer-status" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_transfer_status(socket, envelope.transferStatus());
-            continue;
-        }
-
-        if (envelope.hasTransferChunk()) {
-            qCInfo(shared_peer_service_log) << "received transfer-chunk" << envelope.messageId();
-            note_peer_activity(socket);
-            handle_transfer_chunk(socket, envelope.transferChunk());
-            continue;
-        }
-
-        qCWarning(shared_peer_service_log) << "Ignoring unsupported peer message" << envelope.messageId();
+        handle_who_has(socket, envelope.requestId(), envelope.whoHas());
+        return;
     }
+
+    if (envelope.hasWhoHasReply()) {
+        qCInfo(shared_peer_service_log) << "received who-has-reply" << envelope.messageId() << envelope.requestId();
+        note_peer_activity(socket);
+        if (!envelope.hasRequestId() || envelope.requestId() == 0) {
+            qCWarning(shared_peer_service_log) << "Ignoring who-has reply without request id" << envelope.messageId();
+            return;
+        }
+        handle_who_has_reply(socket, envelope.requestId(), envelope.whoHasReply());
+        return;
+    }
+
+    if (envelope.hasKeepAlive()) {
+        qCInfo(shared_peer_service_log) << "received keep-alive" << envelope.messageId();
+        note_peer_activity(socket);
+        if (envelope.keepAlive().replyToTimeMs() == 0) {
+            send_keepalive(socket, envelope.keepAlive().timeMs());
+        }
+        return;
+    }
+
+    if (envelope.hasTransferOffer()) {
+        qCInfo(shared_peer_service_log) << "received transfer-offer" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_transfer_offer(socket, envelope.transferOffer());
+        return;
+    }
+
+    if (envelope.hasTransferStatus()) {
+        qCInfo(shared_peer_service_log) << "received transfer-status" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_transfer_status(socket, envelope.transferStatus());
+        return;
+    }
+
+    if (envelope.hasTransferChunk()) {
+        qCInfo(shared_peer_service_log) << "received transfer-chunk" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_transfer_chunk(socket, envelope.transferChunk());
+        return;
+    }
+
+    qCWarning(shared_peer_service_log) << "Ignoring unsupported peer message" << envelope.messageId();
 }
 
 void peer_service::handle_encrypted(QSslSocket *socket)
@@ -1608,6 +1642,8 @@ void peer_service::handle_socket_error(QSslSocket *socket)
         << "address=" << socket->peerAddress().toString()
         << "port=" << socket->peerPort()
         << socket->errorString();
+
+    close_socket(socket, QStringLiteral("Socket error: %1").arg(socket->errorString()));
 }
 
 void peer_service::handle_ssl_errors(QSslSocket *socket, const QList<QSslError> &errors)
@@ -1648,6 +1684,11 @@ void peer_service::handle_disconnected(QSslSocket *socket)
     socket_send_states_.remove(socket);
     if (session.outbound && !session.target_peer_id.isEmpty()) {
         pending_connections_.remove(session.target_peer_id);
+        if (session.authenticated) {
+            reset_outbound_connection_backoff(session.target_peer_id);
+        } else if (!session.outbound_failure_recorded) {
+            note_outbound_connection_failure(session.target_peer_id);
+        }
     }
     if (!session.remote_peer_id.isEmpty()) {
         auto &runtime_state = peer_runtime_states_[session.remote_peer_id];
@@ -1739,6 +1780,8 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
 
     if (session_it->outbound) {
         pending_connections_.remove(session_it->target_peer_id);
+        reset_outbound_connection_backoff(session_it->target_peer_id);
+        session_it->outbound_failure_recorded = false;
     }
 
     write_peer_status_snapshot();
@@ -1749,6 +1792,12 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
 
     if (current_peer_list_version_ >= peer_info.peerListVersion()) {
         send_current_peer_list(socket);
+    }
+
+    const auto pending_pre_auth_messages = session_it->pending_pre_auth_messages;
+    session_it->pending_pre_auth_messages.clear();
+    for (const auto &pending_envelope : pending_pre_auth_messages) {
+        process_authenticated_envelope(socket, pending_envelope);
     }
 }
 
@@ -2860,6 +2909,10 @@ void peer_service::maybe_connect_to_peer(
         return;
     }
 
+    if (is_outbound_attempt_deferred(peer_id, peer.identity().name())) {
+        return;
+    }
+
     if (addresses.isEmpty()) {
         qCDebug(shared_peer_service_log)
             << "Skipping outbound peer connection"
@@ -2929,6 +2982,74 @@ bool peer_service::has_session_for_peer(const QString &peer_id) const
     }
 
     return false;
+}
+
+bool peer_service::is_outbound_attempt_deferred(const QString &peer_id, const QString &peer_name) const
+{
+    const auto retry_state_it = outbound_retry_states_.constFind(peer_id);
+    if (retry_state_it == outbound_retry_states_.cend()) {
+        return false;
+    }
+
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    if (retry_state_it->next_attempt_time_ms <= now_ms) {
+        return false;
+    }
+
+    qCDebug(shared_peer_service_log)
+        << "Skipping outbound peer connection"
+        << "peer_id=" << peer_id
+        << "name=" << peer_name
+        << "reason=" << "backoff-active"
+        << "retry_in_ms=" << (retry_state_it->next_attempt_time_ms - now_ms)
+        << "failure_count=" << retry_state_it->consecutive_failures;
+    return true;
+}
+
+void peer_service::note_outbound_connection_failure(const QString &peer_id)
+{
+    if (peer_id.isEmpty()) {
+        return;
+    }
+
+    auto &retry_state = outbound_retry_states_[peer_id];
+    retry_state.consecutive_failures += 1;
+
+    qint64 delay_ms = outbound_retry_initial_delay_ms;
+    for (quint32 index = 1; index < retry_state.consecutive_failures; ++index) {
+        if (delay_ms >= outbound_retry_max_delay_ms / 2) {
+            delay_ms = outbound_retry_max_delay_ms;
+            break;
+        }
+        delay_ms *= 2;
+    }
+
+    if (delay_ms < outbound_retry_max_delay_ms) {
+        const auto jitter_limit_ms = std::max<qint64>(1, delay_ms / 5);
+        delay_ms += static_cast<qint64>(
+            QRandomGenerator::global()->bounded(static_cast<int>(jitter_limit_ms)));
+    }
+
+    retry_state.next_attempt_time_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch() + delay_ms;
+
+    qCInfo(shared_peer_service_log)
+        << "Deferring outbound peer reconnect"
+        << "peer_id=" << peer_id
+        << "failure_count=" << retry_state.consecutive_failures
+        << "delay_ms=" << delay_ms;
+}
+
+void peer_service::reset_outbound_connection_backoff(const QString &peer_id)
+{
+    if (peer_id.isEmpty()) {
+        return;
+    }
+
+    if (outbound_retry_states_.remove(peer_id) > 0) {
+        qCDebug(shared_peer_service_log)
+            << "Cleared outbound peer reconnect backoff"
+            << "peer_id=" << peer_id;
+    }
 }
 
 QStringList peer_service::current_directly_connected_peer_ids() const
@@ -3025,6 +3146,7 @@ void peer_service::enforce_authorized_peer_sessions(const shared::v1::PeerList &
         clear_reachability_claims_for_advertiser(removed_peer_id);
         reachability_claims_by_target_.remove(removed_peer_id);
         pending_connections_.remove(removed_peer_id);
+        outbound_retry_states_.remove(removed_peer_id);
     }
 
     if (!removed_peer_ids.isEmpty()) {
