@@ -21,6 +21,12 @@ qt_add_qml_module(sharedui
         qml/SettingsDialog.qml
 )
 
+qt_add_resources(sharedui "sharedgui_assets"
+    PREFIX "/shared"
+    FILES
+        ../../../icons/shared-icon.svg
+)
+
 target_link_libraries(sharedui PUBLIC
     Qt6::Concurrent
     Qt6::Core

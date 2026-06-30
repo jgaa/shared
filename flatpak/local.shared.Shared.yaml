@@ -48,7 +48,7 @@ modules:
           flatpak/local.shared.Shared.metainfo.xml.in > eu.lastviking.shared.metainfo.xml
       - install -Dm755 _build/bin/sharedgui /app/bin/sharedgui
       - install -Dm644 flatpak/local.shared.Shared.desktop /app/share/applications/eu.lastviking.shared.desktop
-      - install -Dm644 flatpak/local.shared.Shared.svg /app/share/icons/hicolor/scalable/apps/eu.lastviking.shared.svg
+      - install -Dm644 icons/shared-icon.svg /app/share/icons/hicolor/scalable/apps/eu.lastviking.shared.svg
       - install -Dm644 eu.lastviking.shared.metainfo.xml /app/share/metainfo/eu.lastviking.shared.metainfo.xml
     sources:
       - type: dir

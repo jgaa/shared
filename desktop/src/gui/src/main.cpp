@@ -7,6 +7,7 @@
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
+#include <QtGui/QIcon>
 #include <QtWidgets/QApplication>
 #include <QtQml/QQmlApplicationEngine>
 #include <QtQml/QQmlContext>
@@ -29,6 +30,7 @@ int main(int argc, char *argv[])
 {
     set_application_metadata();
     QApplication app{argc, argv};
+    app.setWindowIcon(QIcon(QStringLiteral(":/shared/icons/shared-icon.svg")));
 
     QCommandLineParser parser{};
     parser.setApplicationDescription(QStringLiteral("shared desktop GUI"));
