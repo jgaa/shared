@@ -18,6 +18,7 @@ class daemon_application final : public QObject {
 
 public:
     explicit daemon_application(QObject *parent = nullptr);
+    ~daemon_application() override;
 
     [[nodiscard]] bool start();
     void apply_configuration_change();

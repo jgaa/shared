@@ -20,6 +20,7 @@ public:
         const core::agent_configuration &configuration,
         const core::app_paths &app_paths,
         QObject *parent = nullptr);
+    ~enrollment_server() override;
 
     [[nodiscard]] bool start(QString &error_message);
     void stop();

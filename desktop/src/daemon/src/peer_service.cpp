@@ -120,6 +120,11 @@ peer_service::peer_service(
         &peer_service::flush_reachability_broadcast);
 }
 
+peer_service::~peer_service()
+{
+    stop();
+}
+
 bool peer_service::start(QString &error_message)
 {
     QString peer_list_error{};
@@ -165,8 +170,9 @@ void peer_service::stop()
     server_.close();
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
         if (it.key() != nullptr) {
-            it.key()->disconnectFromHost();
-            it.key()->deleteLater();
+            it.key()->disconnect(this);
+            it.key()->abort();
+            delete it.key();
         }
     }
     sessions_.clear();
@@ -177,13 +183,13 @@ void peer_service::stop()
     for (auto it = incoming_clipboard_transfers_.begin(); it != incoming_clipboard_transfers_.end(); ++it) {
         if (it.value().approval_timer != nullptr) {
             it.value().approval_timer->stop();
-            it.value().approval_timer->deleteLater();
+            delete it.value().approval_timer;
         }
     }
     for (auto it = incoming_file_transfers_.begin(); it != incoming_file_transfers_.end(); ++it) {
         if (it.value().approval_timer != nullptr) {
             it.value().approval_timer->stop();
-            it.value().approval_timer->deleteLater();
+            delete it.value().approval_timer;
         }
         if (!it.value().temp_path.isEmpty()) {
             QFile::remove(it.value().temp_path);

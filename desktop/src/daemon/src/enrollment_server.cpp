@@ -80,6 +80,11 @@ enrollment_server::enrollment_server(
 {
 }
 
+enrollment_server::~enrollment_server()
+{
+    stop();
+}
+
 bool enrollment_server::start(QString &error_message)
 {
     const auto stale_requests = pending_enrollment_repository_.load_requests();
@@ -138,7 +143,9 @@ void enrollment_server::stop()
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
         if (it.key() != nullptr) {
-            it.key()->disconnectFromHost();
+            it.key()->disconnect(this);
+            it.key()->abort();
+            delete it.key();
         }
     }
     sessions_.clear();

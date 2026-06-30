@@ -13,6 +13,17 @@ daemon_application::daemon_application(QObject *parent)
     connect(&configuration_reload_timer_, &QTimer::timeout, this, &daemon_application::reload_configuration);
 }
 
+daemon_application::~daemon_application()
+{
+    configuration_reload_timer_.stop();
+    if (enrollment_server_ != nullptr) {
+        enrollment_server_->stop();
+    }
+    if (peer_service_ != nullptr) {
+        peer_service_->stop();
+    }
+}
+
 bool daemon_application::start()
 {
     if (!app_paths_.ensure_directories()) {

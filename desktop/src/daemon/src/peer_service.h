@@ -30,6 +30,7 @@ public:
         const core::agent_configuration &configuration,
         const core::app_paths &app_paths,
         QObject *parent = nullptr);
+    ~peer_service() override;
 
     [[nodiscard]] bool start(QString &error_message);
     void stop();
