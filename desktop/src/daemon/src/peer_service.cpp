@@ -1302,6 +1302,14 @@ void peer_service::note_peer_activity(QSslSocket *socket)
     runtime_state.last_port = session.remote_listen_port == 0
         ? static_cast<quint16>(socket->peerPort())
         : session.remote_listen_port;
+    if (session.authenticated) {
+        merge_observed_address(
+            session.remote_peer_id,
+            runtime_state.last_ip,
+            runtime_state.last_port,
+            QStringLiteral("direct"),
+            socket);
+    }
     write_peer_status_snapshot();
 }
 
@@ -1605,6 +1613,12 @@ void peer_service::handle_disconnected(QSslSocket *socket)
                 : session.remote_listen_port;
         }
         if (session.authenticated) {
+            merge_observed_address(
+                session.remote_peer_id,
+                runtime_state.last_ip,
+                runtime_state.last_port,
+                QStringLiteral("direct"),
+                socket);
             clear_reachability_claims_for_advertiser(session.remote_peer_id);
             schedule_reachability_broadcast();
         }
