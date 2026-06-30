@@ -1,5 +1,6 @@
 #include "app_controller.h"
 #include "daemon_application.h"
+#include "tray_controller.h"
 
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/logging.h"
@@ -11,8 +12,10 @@
 #include <QtWidgets/QApplication>
 #include <QtQml/QQmlApplicationEngine>
 #include <QtQml/QQmlContext>
+#include <QtGui/QWindow>
 
 #include <iostream>
+#include <memory>
 
 namespace {
 
@@ -123,5 +126,13 @@ int main(int argc, char *argv[])
     if (engine.rootObjects().isEmpty()) {
         return 1;
     }
+
+    auto *window = qobject_cast<QWindow *>(engine.rootObjects().constFirst());
+    std::unique_ptr<shared::desktop::gui::tray_controller> tray{};
+    if (window != nullptr) {
+        tray = std::make_unique<shared::desktop::gui::tray_controller>(&controller, window, &app);
+        app.setQuitOnLastWindowClosed(!tray->available());
+    }
+
     return app.exec();
 }

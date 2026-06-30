@@ -42,6 +42,8 @@ target_link_libraries(sharedui PUBLIC
 shared_set_common_target_options(sharedui)
 
 qt_add_executable(sharedgui
+    src/tray_controller.h
+    src/tray_controller.cpp
     src/main.cpp
 )
 
