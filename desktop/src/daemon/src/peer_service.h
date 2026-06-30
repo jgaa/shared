@@ -219,6 +219,7 @@ private:
     void send_local_peer_info(QSslSocket *socket);
     void send_current_peer_list(QSslSocket *socket);
     void send_known_address_hints(QSslSocket *socket);
+    [[nodiscard]] QHash<QString, QList<shared::v1::PeerAddress>> known_addresses_with_live_sessions() const;
     void send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms = 0);
     void send_current_reachability(QSslSocket *socket);
     void broadcast_peer_list(QSslSocket *exclude_socket = nullptr);

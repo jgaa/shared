@@ -1177,7 +1177,7 @@ void peer_service::send_current_peer_list(QSslSocket *socket)
 
 void peer_service::send_known_address_hints(QSslSocket *socket)
 {
-    const auto all_addresses = address_hint_repository_.load_all();
+    const auto all_addresses = known_addresses_with_live_sessions();
     for (auto it = all_addresses.begin(); it != all_addresses.end(); ++it) {
         if (it.value().isEmpty()) {
             continue;
@@ -1200,6 +1200,56 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
         envelope.setAddressHint(address_hint);
         send_envelope(socket, envelope, QStringLiteral("address-hint"), outbound_priority::normal);
     }
+}
+
+QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_with_live_sessions() const
+{
+    auto all_addresses = address_hint_repository_.load_all();
+
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        const auto &session = it.value();
+        if (!session.authenticated || session.remote_peer_id.isEmpty()) {
+            continue;
+        }
+
+        const auto ip = it.key()->peerAddress().toString().trimmed();
+        const auto port = session.remote_listen_port == 0
+            ? static_cast<quint16>(it.key()->peerPort())
+            : session.remote_listen_port;
+        if (ip.isEmpty() || port == 0) {
+            continue;
+        }
+
+        auto &peer_addresses = all_addresses[session.remote_peer_id];
+        auto updated_existing = false;
+        for (auto &existing : peer_addresses) {
+            if (existing.ip() != ip
+                || existing.port() != port
+                || existing.source() != QStringLiteral("direct")) {
+                continue;
+            }
+
+            if (existing.observedTimeMs() < static_cast<quint64>(now_ms)) {
+                existing.setObservedTimeMs(static_cast<quint64>(now_ms));
+            }
+            updated_existing = true;
+            break;
+        }
+
+        if (updated_existing) {
+            continue;
+        }
+
+        shared::v1::PeerAddress address{};
+        address.setIp(ip);
+        address.setPort(port);
+        address.setSource(QStringLiteral("direct"));
+        address.setObservedTimeMs(static_cast<quint64>(now_ms));
+        peer_addresses.append(address);
+    }
+
+    return all_addresses;
 }
 
 void peer_service::send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms)
