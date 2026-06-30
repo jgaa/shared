@@ -236,7 +236,7 @@ private:
         const shared::v1::Envelope &envelope,
         const QString &context,
         outbound_priority priority = outbound_priority::normal);
-    void note_peer_activity(QSslSocket *socket);
+    void note_peer_activity(QSslSocket *socket, bool publish_observed_address = true);
     void write_peer_status_snapshot();
     void process_authenticated_envelope(
         QSslSocket *socket,

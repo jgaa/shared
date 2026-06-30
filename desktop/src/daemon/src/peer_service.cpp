@@ -88,6 +88,23 @@ bool resolve_listen_address(const QString &host, QHostAddress &address)
     return address.setAddress(trimmed_host);
 }
 
+std::optional<quint64> existing_observed_time_ms(
+    const QList<shared::v1::PeerAddress> &addresses,
+    const QString &ip,
+    quint16 port,
+    const QString &source)
+{
+    for (const auto &address : addresses) {
+        if (address.ip() == ip
+            && address.port() == port
+            && address.source() == source) {
+            return address.observedTimeMs();
+        }
+    }
+
+    return std::nullopt;
+}
+
 }
 
 peer_service::peer_service(
@@ -1350,10 +1367,10 @@ void peer_service::send_envelope(
         << "bytes=" << bytes.size()
         << "peer=" << sessions_.value(socket).remote_peer_id;
     enqueue_frame(socket, {.bytes = bytes, .context = context, .message_id = envelope.messageId(), .priority = priority});
-    note_peer_activity(socket);
+    note_peer_activity(socket, false);
 }
 
-void peer_service::note_peer_activity(QSslSocket *socket)
+void peer_service::note_peer_activity(QSslSocket *socket, bool publish_observed_address)
 {
     const auto session = sessions_.value(socket);
     if (session.remote_peer_id.isEmpty()) {
@@ -1366,7 +1383,7 @@ void peer_service::note_peer_activity(QSslSocket *socket)
     runtime_state.last_port = session.remote_listen_port == 0
         ? static_cast<quint16>(socket->peerPort())
         : session.remote_listen_port;
-    if (session.authenticated) {
+    if (publish_observed_address && session.authenticated) {
         merge_observed_address(
             session.remote_peer_id,
             runtime_state.last_ip,
@@ -3496,7 +3513,16 @@ void peer_service::merge_observed_address(
     address.setIp(ip);
     address.setPort(port);
     address.setSource(source);
-    address.setObservedTimeMs(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch());
+    if (const auto existing_time_ms = existing_observed_time_ms(
+            address_hint_repository_.load_for_peer(peer_id),
+            ip,
+            port,
+            source);
+        existing_time_ms.has_value()) {
+        address.setObservedTimeMs(*existing_time_ms);
+    } else {
+        address.setObservedTimeMs(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch());
+    }
 
     bool changed{};
     address_hint_repository_.merge_address(peer_id, address, changed);
