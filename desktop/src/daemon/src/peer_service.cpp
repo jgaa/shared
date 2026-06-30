@@ -1206,7 +1206,6 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
 {
     auto all_addresses = address_hint_repository_.load_all();
 
-    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
         const auto &session = it.value();
         if (!session.authenticated || session.remote_peer_id.isEmpty()) {
@@ -1222,7 +1221,7 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
         }
 
         auto &peer_addresses = all_addresses[session.remote_peer_id];
-        auto updated_existing = false;
+        auto already_present = false;
         for (auto &existing : peer_addresses) {
             if (existing.ip() != ip
                 || existing.port() != port
@@ -1230,14 +1229,11 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
                 continue;
             }
 
-            if (existing.observedTimeMs() < static_cast<quint64>(now_ms)) {
-                existing.setObservedTimeMs(static_cast<quint64>(now_ms));
-            }
-            updated_existing = true;
+            already_present = true;
             break;
         }
 
-        if (updated_existing) {
+        if (already_present) {
             continue;
         }
 
@@ -1245,7 +1241,8 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
         address.setIp(ip);
         address.setPort(port);
         address.setSource(QStringLiteral("direct"));
-        address.setObservedTimeMs(static_cast<quint64>(now_ms));
+        // Keep synthesized live-session hints stable across republishes to avoid gossip churn.
+        address.setObservedTimeMs(0);
         peer_addresses.append(address);
     }
 
