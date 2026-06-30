@@ -301,6 +301,13 @@ void sharedcore_tests::address_hint_repository_round_trip()
     QCOMPARE(loaded.first().ip(), QStringLiteral("10.0.0.10"));
     QCOMPARE(loaded.first().port(), static_cast<quint32>(47124));
     QCOMPARE(loaded.first().observedTimeMs(), static_cast<quint64>(2000));
+
+    shared::desktop::core::address_hint_repository restarted_repository{app_paths};
+    const auto restarted_loaded = restarted_repository.load_for_peer(QStringLiteral("peer-1"));
+    QCOMPARE(restarted_loaded.size(), 1);
+    QCOMPARE(restarted_loaded.first().ip(), QStringLiteral("10.0.0.10"));
+    QCOMPARE(restarted_loaded.first().port(), static_cast<quint32>(47124));
+    QCOMPARE(restarted_loaded.first().observedTimeMs(), static_cast<quint64>(2000));
 }
 
 void sharedcore_tests::enrollment_fingerprint_normalization()

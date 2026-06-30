@@ -10,6 +10,7 @@
 #include <QtGui/QClipboard>
 #include <QtGui/QGuiApplication>
 #include <QtCore/QDateTime>
+#include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QJsonArray>
@@ -21,6 +22,7 @@
 #include <QtCore/QSettings>
 #include <QtCore/QSysInfo>
 #include <QtCore/QUrl>
+#include <QtCore/QUuid>
 #include <QtCore/QVariantMap>
 #include <QtCore/QtNumeric>
 #include <QtNetwork/QSslSocket>
@@ -99,6 +101,26 @@ QStringList normalized_local_file_paths(const QStringList &paths)
     }
 
     return normalized;
+}
+
+QString unique_staging_path(const QString &directory_path, const QString &filename)
+{
+    QFileInfo filename_info{filename};
+    const auto complete_base_name = filename_info.completeBaseName();
+    const auto suffix = filename_info.suffix();
+    auto candidate_name = filename_info.fileName();
+    auto candidate_path = QDir{directory_path}.filePath(candidate_name);
+    auto counter = 2;
+
+    while (QFileInfo::exists(candidate_path)) {
+        candidate_name = suffix.isEmpty()
+            ? QStringLiteral("%1 (%2)").arg(complete_base_name, QString::number(counter))
+            : QStringLiteral("%1 (%2).%3").arg(complete_base_name, QString::number(counter), suffix);
+        candidate_path = QDir{directory_path}.filePath(candidate_name);
+        ++counter;
+    }
+
+    return candidate_path;
 }
 
 bool remove_settings_store_file(const QString &path, QString &error_message)
@@ -988,7 +1010,12 @@ QStringList app_controller::select_files()
         return {};
     }
 
-    return dialog.selectedFiles();
+    QStringList selected{};
+    for (const auto &url : dialog.selectedUrls()) {
+        selected.append(url.toString());
+    }
+
+    return normalize_selected_file_inputs(selected);
 }
 
 bool app_controller::send_files_to_all(const QStringList &file_paths)
@@ -1013,7 +1040,15 @@ bool app_controller::send_files_to_all(const QStringList &file_paths)
     }
 
     QString error_message{};
-    if (!service_->send_files(peer_ids, normalized_local_file_paths(file_paths), error_message)) {
+    const auto staged_files = stage_files_for_transfer(file_paths, error_message);
+    if (staged_files.isEmpty()) {
+        set_last_error(error_message.isEmpty()
+            ? QStringLiteral("No readable files were selected")
+            : error_message);
+        return false;
+    }
+
+    if (!service_->send_files(peer_ids, staged_files, error_message)) {
         set_last_error(error_message);
         return false;
     }
@@ -1030,7 +1065,15 @@ bool app_controller::send_files_to_peer(const QString &peer_id, const QStringLis
     }
 
     QString error_message{};
-    if (!service_->send_files({peer_id}, normalized_local_file_paths(file_paths), error_message)) {
+    const auto staged_files = stage_files_for_transfer(file_paths, error_message);
+    if (staged_files.isEmpty()) {
+        set_last_error(error_message.isEmpty()
+            ? QStringLiteral("No readable files were selected")
+            : error_message);
+        return false;
+    }
+
+    if (!service_->send_files({peer_id}, staged_files, error_message)) {
         set_last_error(error_message);
         return false;
     }
@@ -1201,6 +1244,54 @@ void app_controller::save_logging_value(const QString &key, const QVariant &valu
     emit logging_settings_changed();
 }
 
+QStringList app_controller::normalize_selected_file_inputs(const QStringList &paths) const
+{
+    return normalized_local_file_paths(paths);
+}
+
+QStringList app_controller::stage_files_for_transfer(const QStringList &file_inputs, QString &error_message) const
+{
+    const auto normalized_paths = normalize_selected_file_inputs(file_inputs);
+    if (normalized_paths.isEmpty()) {
+        error_message = QStringLiteral("No files were selected");
+        return {};
+    }
+
+    const auto staging_directory = QDir{app_paths_.cache_dir()}.filePath(
+        QStringLiteral("outgoing-files/%1").arg(QUuid::createUuidV7().toString(QUuid::WithoutBraces).toLower()));
+    if (!QDir{}.mkpath(staging_directory)) {
+        error_message = QStringLiteral("Failed to create temporary staging directory");
+        return {};
+    }
+
+    QStringList staged_paths{};
+    staged_paths.reserve(normalized_paths.size());
+    for (const auto &source_path : normalized_paths) {
+        QFileInfo source_info{source_path};
+        if (!source_info.exists() || !source_info.isFile()) {
+            error_message = QStringLiteral("Selected file is no longer available: %1").arg(source_path);
+            return {};
+        }
+
+        QFile source_file{source_path};
+        if (!source_file.open(QIODevice::ReadOnly)) {
+            error_message = QStringLiteral("Failed to read selected file: %1").arg(source_path);
+            return {};
+        }
+        source_file.close();
+
+        const auto destination_path = unique_staging_path(staging_directory, source_info.fileName());
+        if (!QFile::copy(source_path, destination_path)) {
+            error_message = QStringLiteral("Failed to stage selected file: %1").arg(source_path);
+            return {};
+        }
+
+        staged_paths.append(destination_path);
+    }
+
+    return staged_paths;
+}
+
 void app_controller::refresh_log_lines()
 {
     const auto next_lines = core::log_ring_buffer::instance().snapshot_lines();
@@ -1286,6 +1377,13 @@ void app_controller::refresh_verified_peers()
             address.isEmpty() || port <= 0
                 ? QString{}
                 : QStringLiteral("%1:%2").arg(address).arg(port));
+        const auto last_known_ip = status.value(QStringLiteral("last_known_ip")).toString();
+        const auto last_known_port = status.value(QStringLiteral("last_known_port")).toInt();
+        row.insert(
+            QStringLiteral("last_known_address"),
+            last_known_ip.isEmpty() || last_known_port <= 0
+                ? last_known_ip
+                : QStringLiteral("%1:%2").arg(last_known_ip).arg(last_known_port));
         row.insert(
             QStringLiteral("last_communicated"),
             format_elapsed(status.value(QStringLiteral("last_communication_time_ms")).toString().toLongLong()));

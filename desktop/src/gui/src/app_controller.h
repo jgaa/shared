@@ -192,6 +192,8 @@ private:
     void set_last_error(const QString &message);
     [[nodiscard]] bool save_configuration_field(std::function<void(core::agent_configuration &)> update);
     void save_logging_value(const QString &key, const QVariant &value);
+    [[nodiscard]] QStringList normalize_selected_file_inputs(const QStringList &paths) const;
+    [[nodiscard]] QStringList stage_files_for_transfer(const QStringList &file_inputs, QString &error_message) const;
     void refresh_log_lines();
     void refresh_verified_peers();
     void refresh_pending_requests();

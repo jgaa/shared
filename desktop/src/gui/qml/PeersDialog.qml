@@ -82,6 +82,14 @@ Dialog {
                                 text: modelData.address
                                 Layout.fillWidth: true
                             }
+
+                            Label {
+                                visible: modelData.last_known_address.length > 0
+                                text: "Last known IP: " + modelData.last_known_address
+                                color: palette.mid
+                                wrapMode: Text.WrapAnywhere
+                                Layout.fillWidth: true
+                            }
                         }
 
                         ColumnLayout {

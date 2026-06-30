@@ -10,7 +10,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
-  - --filesystem=home
+  - --filesystem=xdg-download
+  - --talk-name=org.freedesktop.portal.Desktop
 
 modules:
   - name: shared
