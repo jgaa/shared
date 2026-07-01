@@ -421,6 +421,13 @@ int app_controller::verified_peer_count() const
     return verified_peers_.rowCount();
 }
 
+bool app_controller::direct_peer_connected() const
+{
+    return std::any_of(verified_peers_.rows().cbegin(), verified_peers_.rows().cend(), [](const auto &peer) {
+        return peer.status_label == QStringLiteral("Connected");
+    });
+}
+
 bool app_controller::copy_targets_available() const
 {
     return std::any_of(verified_peers_.rows().cbegin(), verified_peers_.rows().cend(), [](const auto &peer) {
@@ -428,9 +435,27 @@ bool app_controller::copy_targets_available() const
     });
 }
 
-QString app_controller::last_error() const
+QString app_controller::status_message() const
 {
-    return last_error_;
+    return status_message_;
+}
+
+QString app_controller::status_color() const
+{
+    switch (status_level_) {
+    case status_warning:
+        return QStringLiteral("#cf6d1d");
+    case status_error:
+        return QStringLiteral("#b23a2e");
+    case status_ok:
+    default:
+        return QStringLiteral("#2e9d50");
+    }
+}
+
+int app_controller::status_level_value() const
+{
+    return static_cast<int>(status_level_);
 }
 
 QVariantList app_controller::pending_requests() const
@@ -766,7 +791,7 @@ void app_controller::reload_state()
 
 bool app_controller::reinitialize_local_agent()
 {
-    set_last_error({});
+    clear_status_message();
     if (join_in_progress_) {
         set_last_error(QStringLiteral("Enrollment is already in progress"));
         return false;
@@ -796,6 +821,7 @@ bool app_controller::reinitialize_local_agent()
         configuration_repository_.save(configuration);
 
         reload_state();
+        set_ok_message(QStringLiteral("Local agent reset to first-run setup"));
         emit configuration_changed();
         emit state_changed();
         return true;
@@ -808,7 +834,7 @@ bool app_controller::reinitialize_local_agent()
 
 bool app_controller::decommission()
 {
-    set_last_error({});
+    clear_status_message();
     if (join_in_progress_) {
         set_last_error(QStringLiteral("Enrollment is already in progress"));
         return false;
@@ -867,7 +893,7 @@ bool app_controller::decommission()
 
 bool app_controller::initialize_local_trusted_agent(const QString &name, int enrollment_port)
 {
-    set_last_error({});
+    clear_status_message();
     const auto effective_name = normalized_agent_name(name);
     qCInfo(shared_gui_app_controller_log) << "Initialize trusted agent requested" << effective_name << enrollment_port;
 
@@ -894,6 +920,7 @@ bool app_controller::initialize_local_trusted_agent(const QString &name, int enr
         configuration_repository_.save(configuration_);
         trusted_agent_fingerprint_ = result.enrollment_fingerprint;
         qCInfo(shared_gui_app_controller_log) << "Trusted agent initialized" << configuration_.peer_id << configuration_.enrollment_port;
+        set_ok_message(QStringLiteral("Trusted agent initialized"));
         emit configuration_changed();
         emit state_changed();
         return true;
@@ -920,7 +947,7 @@ bool app_controller::join_trusted_agent(
 
 QString app_controller::prepare_join_trusted_agent(const QString &name)
 {
-    set_last_error({});
+    clear_status_message();
     if (join_in_progress_) {
         set_last_error(QStringLiteral("Enrollment is already in progress"));
         return {};
@@ -962,7 +989,7 @@ bool app_controller::complete_join_trusted_agent(
     int port,
     const QString &fingerprint)
 {
-    set_last_error({});
+    clear_status_message();
     qCInfo(shared_gui_app_controller_log)
         << "Complete join trusted agent requested"
         << "name=" << pending_join_name_
@@ -1087,7 +1114,7 @@ bool app_controller::send_clipboard_to_all()
         return false;
     }
 
-    set_last_error({});
+    set_ok_message(QStringLiteral("Clipboard queued for %1 peers").arg(peer_ids.size()));
     return true;
 }
 
@@ -1104,7 +1131,7 @@ bool app_controller::send_clipboard_to_peer(const QString &peer_id)
         return false;
     }
 
-    set_last_error({});
+    set_ok_message(QStringLiteral("Clipboard queued for transfer"));
     return true;
 }
 
@@ -1160,7 +1187,7 @@ bool app_controller::send_files_to_all(const QStringList &file_paths)
         return false;
     }
 
-    set_last_error({});
+    set_ok_message(QStringLiteral("Files queued for %1 peers").arg(peer_ids.size()));
     return true;
 }
 
@@ -1185,13 +1212,13 @@ bool app_controller::send_files_to_peer(const QString &peer_id, const QStringLis
         return false;
     }
 
-    set_last_error({});
+    set_ok_message(QStringLiteral("Files queued for transfer"));
     return true;
 }
 
 bool app_controller::remove_authorized_peer(const QString &peer_id)
 {
-    set_last_error({});
+    clear_status_message();
     if (configuration_.role != core::agent_role::local_trusted_agent) {
         set_last_error(QStringLiteral("Only the trusted agent can remove authorized peers"));
         return false;
@@ -1222,6 +1249,7 @@ bool app_controller::remove_authorized_peer(const QString &peer_id)
             << "Removed authorized peer"
             << "peer_id=" << normalized_peer_id;
         refresh_verified_peers();
+        set_ok_message(QStringLiteral("Authorized peer removed"));
         emit peers_changed();
         return true;
     } catch (const std::exception &exception) {
@@ -1253,6 +1281,7 @@ bool app_controller::approve_clipboard_transfer()
     }
 
     clear_pending_clipboard_approval();
+    set_ok_message(QStringLiteral("Clipboard transfer approved"));
     return true;
 }
 
@@ -1273,6 +1302,7 @@ bool app_controller::reject_clipboard_transfer()
     }
 
     clear_pending_clipboard_approval();
+    set_warning_message(QStringLiteral("Clipboard transfer rejected"));
     return true;
 }
 
@@ -1290,6 +1320,7 @@ bool app_controller::approve_file_transfer()
     }
 
     clear_pending_file_approval();
+    set_ok_message(QStringLiteral("File transfer approved"));
     return true;
 }
 
@@ -1310,7 +1341,30 @@ bool app_controller::reject_file_transfer()
     }
 
     clear_pending_file_approval();
+    set_warning_message(QStringLiteral("File transfer rejected"));
     return true;
+}
+
+void app_controller::clear_status_message()
+{
+    if (status_message_.isEmpty() && status_level_ == status_ok) {
+        return;
+    }
+
+    status_message_.clear();
+    status_level_ = status_ok;
+    emit state_changed();
+}
+
+void app_controller::set_status_message(const QString &message, status_level level)
+{
+    if (status_message_ == message && status_level_ == level) {
+        return;
+    }
+
+    status_message_ = message;
+    status_level_ = level;
+    emit state_changed();
 }
 
 void app_controller::set_last_error(const QString &message)
@@ -1318,14 +1372,29 @@ void app_controller::set_last_error(const QString &message)
     if (!message.isEmpty()) {
         qCWarning(shared_gui_app_controller_log) << "GUI error:" << message;
     }
-    last_error_ = message;
-    emit state_changed();
+    set_status_message(message, status_error);
+}
+
+void app_controller::set_warning_message(const QString &message)
+{
+    if (!message.isEmpty()) {
+        qCWarning(shared_gui_app_controller_log) << "GUI warning:" << message;
+    }
+    set_status_message(message, status_warning);
+}
+
+void app_controller::set_ok_message(const QString &message)
+{
+    if (!message.isEmpty()) {
+        qCInfo(shared_gui_app_controller_log) << "GUI status:" << message;
+    }
+    set_status_message(message, status_ok);
 }
 
 bool app_controller::save_configuration_field(std::function<void(core::agent_configuration &)> update)
 {
     try {
-        set_last_error({});
+        clear_status_message();
         auto next_configuration = configuration_;
         update(next_configuration);
         configuration_repository_.save(next_configuration);
@@ -1549,6 +1618,7 @@ void app_controller::finish_join_request()
 
         qCInfo(shared_gui_app_controller_log) << "Join trusted agent succeeded";
         reload_state();
+        set_ok_message(QStringLiteral("Enrollment completed"));
         emit configuration_changed();
         emit state_changed();
     } catch (const std::exception &exception) {
@@ -1576,6 +1646,7 @@ void app_controller::handle_clipboard_approval_requested(
         << "transfer_id=" << transfer_id
         << "sender=" << sender_name
         << "size=" << size_bytes;
+    set_warning_message(QStringLiteral("Clipboard transfer from %1 requires approval").arg(sender_name));
     emit clipboard_approval_changed();
 }
 
@@ -1592,7 +1663,7 @@ void app_controller::handle_clipboard_text_received(
         << "sender=" << sender_name
         << "bytes=" << text.toUtf8().size();
     clear_pending_clipboard_approval();
-    set_last_error(QStringLiteral("Clipboard received from %1").arg(sender_name));
+    set_ok_message(QStringLiteral("Clipboard received from %1").arg(sender_name));
 }
 
 void app_controller::handle_clipboard_transfer_status(
@@ -1617,7 +1688,22 @@ void app_controller::handle_clipboard_transfer_status(
     }
 
     if (!message.isEmpty()) {
-        set_last_error(QStringLiteral("%1: %2").arg(peer_name, message));
+        const auto full_message = QStringLiteral("%1: %2").arg(peer_name, message);
+        switch (static_cast<shared::v1::TransferStatusCodeGadget::TransferStatusCode>(status)) {
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED:
+            set_ok_message(full_message);
+            break;
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_CANCELLED:
+            set_warning_message(full_message);
+            break;
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR:
+        default:
+            set_last_error(full_message);
+            break;
+        }
     }
 }
 
@@ -1633,6 +1719,7 @@ void app_controller::handle_file_approval_requested(
     file_approval_sender_name_ = sender_name;
     file_approval_filename_ = filename;
     file_approval_size_bytes_ = size_bytes;
+    set_warning_message(QStringLiteral("File transfer %1 from %2 requires approval").arg(filename, sender_name));
     emit file_approval_changed();
 }
 
@@ -1652,7 +1739,7 @@ void app_controller::handle_file_received(
         << "sender=" << sender_name
         << "filename=" << filename
         << "saved_path=" << saved_path;
-    set_last_error(QStringLiteral("Received %1 from %2").arg(filename, sender_name));
+    set_ok_message(QStringLiteral("Received %1 from %2").arg(filename, sender_name));
 }
 
 void app_controller::handle_file_transfer_status(
@@ -1676,7 +1763,22 @@ void app_controller::handle_file_transfer_status(
     }
 
     if (!message.isEmpty()) {
-        set_last_error(QStringLiteral("%1: %2").arg(peer_name, message));
+        const auto full_message = QStringLiteral("%1: %2").arg(peer_name, message);
+        switch (static_cast<shared::v1::TransferStatusCodeGadget::TransferStatusCode>(status)) {
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED:
+            set_ok_message(full_message);
+            break;
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED:
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_CANCELLED:
+            set_warning_message(full_message);
+            break;
+        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR:
+        default:
+            set_last_error(full_message);
+            break;
+        }
     }
 }
 

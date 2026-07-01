@@ -91,8 +91,11 @@ class app_controller final : public QObject {
     Q_PROPERTY(QString trusted_agent_fingerprint READ trusted_agent_fingerprint NOTIFY state_changed)
     Q_PROPERTY(QAbstractListModel* verified_peers READ verified_peers CONSTANT)
     Q_PROPERTY(int verified_peer_count READ verified_peer_count NOTIFY peers_changed)
+    Q_PROPERTY(bool direct_peer_connected READ direct_peer_connected NOTIFY peers_changed)
     Q_PROPERTY(bool copy_targets_available READ copy_targets_available NOTIFY peers_changed)
-    Q_PROPERTY(QString last_error READ last_error NOTIFY state_changed)
+    Q_PROPERTY(QString status_message READ status_message NOTIFY state_changed)
+    Q_PROPERTY(QString status_color READ status_color NOTIFY state_changed)
+    Q_PROPERTY(int status_level_value READ status_level_value NOTIFY state_changed)
     Q_PROPERTY(QVariantList pending_requests READ pending_requests NOTIFY state_changed)
     Q_PROPERTY(bool local_socket_enabled READ local_socket_enabled WRITE set_local_socket_enabled NOTIFY transfer_settings_changed)
     Q_PROPERTY(int clipboard_limit_megabytes READ clipboard_limit_megabytes WRITE set_clipboard_limit_megabytes NOTIFY clipboard_limit_megabytes_changed)
@@ -120,6 +123,13 @@ class app_controller final : public QObject {
     Q_PROPERTY(qulonglong file_approval_size_bytes READ file_approval_size_bytes NOTIFY file_approval_changed)
 
 public:
+    enum status_level {
+        status_ok = 0,
+        status_warning = 1,
+        status_error = 2,
+    };
+    Q_ENUM(status_level)
+
     explicit app_controller(QObject *parent = nullptr);
     void set_service(daemon::daemon_application *service);
 
@@ -145,8 +155,11 @@ public:
     [[nodiscard]] QString trusted_agent_fingerprint() const;
     [[nodiscard]] QAbstractListModel *verified_peers() const;
     [[nodiscard]] int verified_peer_count() const;
+    [[nodiscard]] bool direct_peer_connected() const;
     [[nodiscard]] bool copy_targets_available() const;
-    [[nodiscard]] QString last_error() const;
+    [[nodiscard]] QString status_message() const;
+    [[nodiscard]] QString status_color() const;
+    [[nodiscard]] int status_level_value() const;
     [[nodiscard]] QVariantList pending_requests() const;
     [[nodiscard]] bool local_socket_enabled() const;
     [[nodiscard]] int clipboard_limit_megabytes() const;
@@ -233,7 +246,11 @@ signals:
 private:
     static constexpr int bytes_per_megabyte{1024 * 1024};
 
+    void clear_status_message();
+    void set_status_message(const QString &message, status_level level);
     void set_last_error(const QString &message);
+    void set_warning_message(const QString &message);
+    void set_ok_message(const QString &message);
     [[nodiscard]] bool save_configuration_field(std::function<void(core::agent_configuration &)> update);
     void save_logging_value(const QString &key, const QVariant &value);
     [[nodiscard]] QStringList normalize_selected_file_inputs(const QStringList &paths) const;
@@ -287,7 +304,8 @@ private:
     core::agent_configuration configuration_{};
     QString trusted_agent_fingerprint_{};
     verified_peers_model verified_peers_{this};
-    QString last_error_{};
+    QString status_message_{};
+    status_level status_level_{status_ok};
     int clipboard_limit_megabytes_{};
     QStringList log_lines_{};
     QStringList pending_request_ids_{};

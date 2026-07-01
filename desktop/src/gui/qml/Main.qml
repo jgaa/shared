@@ -18,6 +18,50 @@ ApplicationWindow {
     height: 600
     visible: true
     title: app_controller.app_name
+    footer: Rectangle {
+        implicitHeight: 42
+        color: "#f7f4ec"
+        border.color: "#d2c7b6"
+        border.width: 1
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+            spacing: 12
+
+            Rectangle {
+                width: 12
+                height: 12
+                radius: 6
+                color: app_controller.direct_peer_connected ? "#2e9d50" : "#b23a2e"
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            Label {
+                text: app_controller.direct_peer_connected ? "Direct peer connected" : "No direct peer connection"
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            Rectangle {
+                width: 1
+                height: 18
+                color: "#d2c7b6"
+                Layout.alignment: Qt.AlignVCenter
+            }
+
+            Label {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                text: app_controller.status_message.length > 0
+                    ? app_controller.status_message
+                    : (app_controller.configured ? "Ready" : "Setup required")
+                color: app_controller.status_message.length > 0 ? app_controller.status_color : palette.text
+                wrapMode: Text.WordWrap
+                elide: Text.ElideRight
+            }
+        }
+    }
     menuBar: MenuBar {
         Menu {
             title: "File"
@@ -339,29 +383,6 @@ ApplicationWindow {
                                 }
                             }
                         }
-                    }
-                }
-            }
-
-            Frame {
-                visible: app_controller.last_error.length > 0
-                Layout.fillWidth: true
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 8
-
-                    Label {
-                        text: "Last error"
-                        font.pixelSize: 20
-                        font.bold: true
-                    }
-
-                    Label {
-                        text: app_controller.last_error
-                        color: "#7a130b"
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
                     }
                 }
             }
