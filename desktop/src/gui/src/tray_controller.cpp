@@ -4,23 +4,104 @@
 
 #include <QtCore/QCoreApplication>
 #include <QtCore/QEvent>
+#include <QtCore/QPoint>
+#include <QtCore/QRect>
+#include <QtCore/QSettings>
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
 #include <QtGui/QAction>
 #include <QtGui/QCloseEvent>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QPainter>
+#include <QtGui/QScreen>
 #include <QtGui/QWindow>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QSystemTrayIcon>
 
 #include <algorithm>
+#include <limits>
 
 namespace shared::desktop::gui {
 
 namespace {
 
 constexpr auto shared_icon_path = ":/shared/icons/shared-icon.svg";
+constexpr auto settings_group = "window";
+constexpr auto x_key = "x";
+constexpr auto y_key = "y";
+constexpr auto width_key = "width";
+constexpr auto height_key = "height";
+constexpr auto maximized_key = "maximized";
+
+bool running_on_wayland()
+{
+    return QGuiApplication::platformName().contains(QStringLiteral("wayland"), Qt::CaseInsensitive);
+}
+
+int squared_distance_to_rect(const QPoint &point, const QRect &rect)
+{
+    const auto dx = point.x() < rect.left()
+        ? rect.left() - point.x()
+        : (point.x() > rect.right() ? point.x() - rect.right() : 0);
+    const auto dy = point.y() < rect.top()
+        ? rect.top() - point.y()
+        : (point.y() > rect.bottom() ? point.y() - rect.bottom() : 0);
+    return dx * dx + dy * dy;
+}
+
+QRect clamp_window_geometry(const QRect &geometry)
+{
+    const auto screens = QGuiApplication::screens();
+    if (screens.isEmpty()) {
+        return geometry;
+    }
+
+    QRect target = geometry;
+    QScreen *best_screen = nullptr;
+    auto best_intersection_area = -1;
+
+    for (auto *screen : screens) {
+        if (screen == nullptr) {
+            continue;
+        }
+
+        const auto available = screen->availableGeometry();
+        const auto intersection = available.intersected(target);
+        const auto intersection_area = intersection.width() * intersection.height();
+        if (intersection_area > best_intersection_area) {
+            best_intersection_area = intersection_area;
+            best_screen = screen;
+        }
+    }
+
+    if (best_screen == nullptr || best_intersection_area <= 0) {
+        auto best_distance = std::numeric_limits<int>::max();
+        const auto center = target.center();
+        for (auto *screen : screens) {
+            if (screen == nullptr) {
+                continue;
+            }
+
+            const auto distance = squared_distance_to_rect(center, screen->availableGeometry());
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_screen = screen;
+            }
+        }
+    }
+
+    if (best_screen == nullptr) {
+        best_screen = screens.constFirst();
+    }
+
+    const auto available = best_screen->availableGeometry();
+    const auto width = std::clamp(target.width(), 320, available.width());
+    const auto height = std::clamp(target.height(), 240, available.height());
+    target.setSize({width, height});
+    target.moveLeft(std::clamp(target.left(), available.left(), available.right() - width + 1));
+    target.moveTop(std::clamp(target.top(), available.top(), available.bottom() - height + 1));
+    return target;
+}
 
 QString format_alert_message(
     int pending_request_count,
@@ -49,7 +130,15 @@ tray_controller::tray_controller(app_controller *controller, QWindow *window, QO
     , controller_{controller}
     , window_{window}
 {
-    if (controller_ == nullptr || window_ == nullptr || !QSystemTrayIcon::isSystemTrayAvailable()) {
+    if (controller_ == nullptr || window_ == nullptr) {
+        return;
+    }
+
+    restore_window_placement();
+
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+        window_->installEventFilter(this);
+        show_window();
         return;
     }
 
@@ -90,6 +179,7 @@ tray_controller::tray_controller(app_controller *controller, QWindow *window, QO
     window_->installEventFilter(this);
     tray_icon_->show();
     refresh_state();
+    show_window();
 }
 
 tray_controller::~tray_controller()
@@ -110,11 +200,20 @@ bool tray_controller::available() const
 
 bool tray_controller::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == window_ && event != nullptr && event->type() == QEvent::Hide) {
+        save_window_placement();
+    }
+
     if (watched == window_
         && event != nullptr
         && event->type() == QEvent::Close
-        && tray_icon_ != nullptr
         && !allow_window_close_) {
+        save_window_placement();
+
+        if (tray_icon_ == nullptr) {
+            return QObject::eventFilter(watched, event);
+        }
+
         auto *close_event = static_cast<QCloseEvent *>(event);
         close_event->ignore();
         hide_window();
@@ -151,7 +250,12 @@ void tray_controller::show_window()
         return;
     }
 
-    window_->show();
+    restore_window_placement();
+    if (restore_maximized_on_show_) {
+        window_->showMaximized();
+    } else {
+        window_->show();
+    }
     window_->raise();
     window_->requestActivate();
 }
@@ -162,12 +266,14 @@ void tray_controller::hide_window()
         return;
     }
 
+    save_window_placement();
     window_->hide();
 }
 
 void tray_controller::request_quit()
 {
     allow_window_close_ = true;
+    save_window_placement();
     QCoreApplication::quit();
 }
 
@@ -320,6 +426,63 @@ QIcon tray_controller::build_alert_icon() const
     }
 
     return icon.isNull() ? normal_icon_ : icon;
+}
+
+void tray_controller::restore_window_placement()
+{
+    if (window_ == nullptr) {
+        return;
+    }
+
+    QSettings settings{};
+    settings.beginGroup(QString::fromLatin1(settings_group));
+    const auto has_geometry =
+        settings.contains(QString::fromLatin1(x_key))
+        && settings.contains(QString::fromLatin1(y_key))
+        && settings.contains(QString::fromLatin1(width_key))
+        && settings.contains(QString::fromLatin1(height_key));
+    if (!has_geometry) {
+        settings.endGroup();
+        return;
+    }
+
+    const QRect saved_geometry{
+        settings.value(QString::fromLatin1(x_key)).toInt(),
+        settings.value(QString::fromLatin1(y_key)).toInt(),
+        settings.value(QString::fromLatin1(width_key)).toInt(),
+        settings.value(QString::fromLatin1(height_key)).toInt(),
+    };
+    restore_maximized_on_show_ = settings.value(QString::fromLatin1(maximized_key), false).toBool();
+    settings.endGroup();
+
+    if (running_on_wayland()) {
+        const auto size = saved_geometry.size();
+        if (size.width() > 0 && size.height() > 0) {
+            window_->resize(size);
+        }
+        return;
+    }
+
+    const auto clamped_geometry = clamp_window_geometry(saved_geometry);
+    window_->setGeometry(clamped_geometry);
+}
+
+void tray_controller::save_window_placement() const
+{
+    if (window_ == nullptr) {
+        return;
+    }
+
+    const auto geometry = clamp_window_geometry(window_->geometry());
+    QSettings settings{};
+    settings.beginGroup(QString::fromLatin1(settings_group));
+    settings.setValue(QString::fromLatin1(x_key), geometry.x());
+    settings.setValue(QString::fromLatin1(y_key), geometry.y());
+    settings.setValue(QString::fromLatin1(width_key), geometry.width());
+    settings.setValue(QString::fromLatin1(height_key), geometry.height());
+    settings.setValue(QString::fromLatin1(maximized_key), window_->visibility() == QWindow::Maximized);
+    settings.endGroup();
+    settings.sync();
 }
 
 }

@@ -77,7 +77,7 @@ Dialog {
                             }
 
                             Label {
-                                visible: address.length > 0
+                                visible: address.length > 0 && address !== last_known_address
                                 text: address
                                 Layout.fillWidth: true
                             }

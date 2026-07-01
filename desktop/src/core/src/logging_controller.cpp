@@ -76,9 +76,9 @@ void logging_controller::initialize(const runtime_options &options) const
     settings.sync();
 
     const auto console_level = options.console_level_override.value_or(
-        settings.value(QStringLiteral("logging/applevel"), default_log_level()).toInt());
+        settings.value(QStringLiteral("logging/applevel"), default_console_log_level()).toInt());
     const auto file_level = options.file_level_override.value_or(
-        settings.value(QStringLiteral("logging/level"), default_log_level()).toInt());
+        settings.value(QStringLiteral("logging/level"), default_file_log_level()).toInt());
     const auto log_file_path = options.has_log_file_override
         ? normalize_path(options.log_file_override)
         : normalize_path(settings.value(QStringLiteral("logging/path"), options.default_log_file_path).toString());
@@ -109,10 +109,10 @@ void logging_controller::initialize(const runtime_options &options) const
 void logging_controller::ensure_defaults(QSettings &settings, const QString &default_log_file_path) const
 {
     if (!settings.contains(QStringLiteral("logging/applevel"))) {
-        settings.setValue(QStringLiteral("logging/applevel"), default_log_level());
+        settings.setValue(QStringLiteral("logging/applevel"), default_console_log_level());
     }
     if (!settings.contains(QStringLiteral("logging/level"))) {
-        settings.setValue(QStringLiteral("logging/level"), default_log_level());
+        settings.setValue(QStringLiteral("logging/level"), default_file_log_level());
     }
     if (!settings.contains(QStringLiteral("logging/path"))) {
         settings.setValue(QStringLiteral("logging/path"), normalize_path(default_log_file_path));
@@ -127,7 +127,7 @@ QString logging_controller::settings_file_path() const
     return QFileInfo(QSettings{}.fileName()).absoluteFilePath();
 }
 
-int logging_controller::default_log_level() noexcept
+int logging_controller::default_console_log_level() noexcept
 {
 #ifdef NDEBUG
     return info_level;
@@ -136,9 +136,23 @@ int logging_controller::default_log_level() noexcept
 #endif
 }
 
+int logging_controller::default_file_log_level() noexcept
+{
+#ifdef NDEBUG
+    return disabled_level;
+#else
+    return trace_level;
+#endif
+}
+
 QString logging_controller::default_log_file_path(const QString &application_name)
 {
+#ifdef NDEBUG
+    Q_UNUSED(application_name)
+    return {};
+#else
     return QDir::temp().filePath(application_name + QStringLiteral(".log"));
+#endif
 }
 
 std::optional<int> logging_controller::parse_log_level_name(const QString &name) noexcept

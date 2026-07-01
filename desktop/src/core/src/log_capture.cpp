@@ -24,6 +24,10 @@ void log_ring_buffer::append(const logfault::Message &message) noexcept
             .level = QString::fromLatin1(logfault::Handler::LevelName(message.level_)),
             .line = QString::fromStdString(out.str()),
         };
+        if (line.line.size() > max_line_length_) {
+            line.line.truncate(max_line_length_);
+            line.line.append(QStringLiteral("..."));
+        }
 
         std::lock_guard lock{mutex_};
         if (lines_.size() >= capacity_) {

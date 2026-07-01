@@ -524,7 +524,7 @@ int app_controller::app_log_level() const
     ensure_settings_ok(settings, QStringLiteral("Failed to open GUI settings for reading"));
     return settings.value(
         QStringLiteral("logging/applevel"),
-        core::logging_controller::default_log_level()).toInt();
+        core::logging_controller::default_console_log_level()).toInt();
 }
 
 int app_controller::file_log_level() const
@@ -533,7 +533,7 @@ int app_controller::file_log_level() const
     ensure_settings_ok(settings, QStringLiteral("Failed to open GUI settings for reading"));
     return settings.value(
         QStringLiteral("logging/level"),
-        core::logging_controller::default_log_level()).toInt();
+        core::logging_controller::default_file_log_level()).toInt();
 }
 
 QString app_controller::log_file_path() const

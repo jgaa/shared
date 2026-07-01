@@ -26,6 +26,8 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void restore_window_placement();
+    void save_window_placement() const;
     void toggle_window_visibility();
     void show_window();
     void hide_window();
@@ -54,6 +56,7 @@ private:
     bool alert_active_{};
     bool animation_phase_alert_{};
     bool allow_window_close_{};
+    bool restore_maximized_on_show_{};
 };
 
 }

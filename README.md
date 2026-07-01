@@ -96,11 +96,11 @@ Shared currently focuses on secure manual transfers between trusted devices.
 The current implementation supports:
 
 * desktop peers
+* Android peers
 * clipboard text
 * file transfers
 * one logged-in user session per peer
-
-Android support is defined in the specifications and is planned alongside the desktop implementation.
+* gossip and peer discovery
 
 The project intentionally does **not** attempt to become a cloud storage system or desktop synchronization platform. Features such as shared folders, automatic clipboard synchronization, browser interfaces, and multi-hop routing are outside the scope.
 

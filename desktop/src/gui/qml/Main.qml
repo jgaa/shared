@@ -16,7 +16,7 @@ ApplicationWindow {
 
     width: 900
     height: 600
-    visible: true
+    visible: false
     title: app_controller.app_name
     footer: Rectangle {
         implicitHeight: 42
@@ -277,19 +277,37 @@ ApplicationWindow {
                                     font.bold: true
                                 }
 
-                                TextField {
-                                    id: peer_name
-
-                                    text: app_controller.default_agent_name
-                                    placeholderText: "Device name"
+                                RowLayout {
                                     Layout.fillWidth: true
+
+                                    Label {
+                                        text: "Device Name"
+                                        Layout.preferredWidth: 170
+                                    }
+
+                                    TextField {
+                                        id: peer_name
+
+                                        text: app_controller.default_agent_name
+                                        placeholderText: "Device name"
+                                        Layout.fillWidth: true
+                                    }
                                 }
 
-                                TextField {
-                                    id: peer_host
-
-                                    placeholderText: "Trusted agent host or IP"
+                                RowLayout {
                                     Layout.fillWidth: true
+
+                                    Label {
+                                        text: "Trusted Agent Host"
+                                        Layout.preferredWidth: 170
+                                    }
+
+                                    TextField {
+                                        id: peer_host
+
+                                        placeholderText: "Trusted agent host or IP"
+                                        Layout.fillWidth: true
+                                    }
                                 }
 
                                 RowLayout {
@@ -297,6 +315,7 @@ ApplicationWindow {
 
                                     Label {
                                         text: "TCP Port"
+                                        Layout.preferredWidth: 170
                                     }
 
                                     SpinBox {
@@ -311,6 +330,11 @@ ApplicationWindow {
 
                                 RowLayout {
                                     Layout.fillWidth: true
+
+                                    Label {
+                                        text: "Enrollment Fingerprint"
+                                        Layout.preferredWidth: 170
+                                    }
 
                                     TextField {
                                         id: peer_fingerprint
@@ -352,12 +376,21 @@ ApplicationWindow {
                                     font.bold: true
                                 }
 
-                                TextField {
-                                    id: trusted_name
-
-                                    text: app_controller.default_agent_name
-                                    placeholderText: "Device name"
+                                RowLayout {
                                     Layout.fillWidth: true
+
+                                    Label {
+                                        text: "Device Name"
+                                        Layout.preferredWidth: 170
+                                    }
+
+                                    TextField {
+                                        id: trusted_name
+
+                                        text: app_controller.default_agent_name
+                                        placeholderText: "Device name"
+                                        Layout.fillWidth: true
+                                    }
                                 }
 
                                 RowLayout {
@@ -365,6 +398,7 @@ ApplicationWindow {
 
                                     Label {
                                         text: "TCP Port"
+                                        Layout.preferredWidth: 170
                                     }
 
                                     SpinBox {

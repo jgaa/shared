@@ -56,7 +56,7 @@ ScrollView {
             id: log_path_field
 
             Layout.fillWidth: true
-            placeholderText: "/tmp/shared-gui.log"
+            placeholderText: "Leave empty to disable file logging"
             onEditingFinished: app_controller.log_file_path = text.trim()
         }
 

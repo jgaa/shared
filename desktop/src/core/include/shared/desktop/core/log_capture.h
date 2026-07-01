@@ -23,7 +23,8 @@ public:
     [[nodiscard]] QStringList snapshot_lines() const;
 
 private:
-    static constexpr std::size_t capacity_{1000};
+    static constexpr std::size_t capacity_{500};
+    static constexpr qsizetype max_line_length_{2048};
 
     mutable std::mutex mutex_{};
     std::deque<captured_log_line> lines_{};

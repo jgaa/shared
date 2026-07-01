@@ -34,7 +34,8 @@ public:
     void ensure_defaults(QSettings &settings, const QString &default_log_file_path) const;
     [[nodiscard]] QString settings_file_path() const;
 
-    [[nodiscard]] static int default_log_level() noexcept;
+    [[nodiscard]] static int default_console_log_level() noexcept;
+    [[nodiscard]] static int default_file_log_level() noexcept;
     [[nodiscard]] static QString default_log_file_path(const QString &application_name);
     [[nodiscard]] static std::optional<int> parse_log_level_name(const QString &name) noexcept;
     [[nodiscard]] static QString normalize_path(const QString &path);
