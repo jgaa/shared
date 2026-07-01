@@ -22,16 +22,25 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-set(SHARED_LOGFAULT_SOURCE_DIR "/home/jgaa/src/logfault" CACHE PATH "Use a local source dir for logfault")
-if(SHARED_LOGFAULT_SOURCE_DIR AND EXISTS "${SHARED_LOGFAULT_SOURCE_DIR}/CMakeLists.txt")
-    message(STATUS "shared_desktop: using local logfault from ${SHARED_LOGFAULT_SOURCE_DIR}")
-    FetchContent_Declare(logfault SOURCE_DIR "${SHARED_LOGFAULT_SOURCE_DIR}")
+
+set(SHARED_LOGFAULT_SOURCE_DIR "" CACHE PATH "Use a local source dir for logfault")
+
+if(SHARED_LOGFAULT_SOURCE_DIR)
+    if(EXISTS "${SHARED_LOGFAULT_SOURCE_DIR}/CMakeLists.txt")
+        message(STATUS "shared_desktop: using local logfault from ${SHARED_LOGFAULT_SOURCE_DIR}")
+        FetchContent_Declare(logfault SOURCE_DIR "${SHARED_LOGFAULT_SOURCE_DIR}")
+    else()
+        message(FATAL_ERROR "SHARED_LOGFAULT_SOURCE_DIR is set but invalid: ${SHARED_LOGFAULT_SOURCE_DIR}")
+    endif()
 else()
     FetchContent_Declare(logfault
         GIT_REPOSITORY https://github.com/jgaa/logfault.git
-        GIT_TAG v0.8.5
+        GIT_TAG master
     )
 endif()
+
+FetchContent_MakeAvailable(logfault)
+
 FetchContent_MakeAvailable(logfault)
 
 set(SHARED_QCORO_SOURCE_DIR "" CACHE PATH "Use a local source dir for QCoro")
