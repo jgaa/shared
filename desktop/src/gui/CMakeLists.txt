@@ -61,3 +61,5 @@ target_link_libraries(sharedgui PRIVATE
 )
 
 shared_set_common_target_options(sharedgui)
+
+install(TARGETS sharedgui RUNTIME DESTINATION bin)

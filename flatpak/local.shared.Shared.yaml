@@ -26,8 +26,6 @@ modules:
     buildsystem: simple
     build-commands:
       - |
-        app_version="$(sed -nE 's/^project\(shared_desktop VERSION ([^ ]+) LANGUAGES CXX\)$/\1/p' desktop/CMakeLists.txt)"
-        test -n "${app_version}"
         cat > /tmp/check-kf6wallet.cmake <<'EOF'
         find_package(KF6Wallet QUIET CONFIG)
         if(NOT KF6Wallet_FOUND)
@@ -51,14 +49,7 @@ modules:
           -DSHARED_QCORO_SOURCE_DIR="$(pwd)/third_party/qcoro" \
           -DSHARED_LOGFAULT_SOURCE_DIR="$(pwd)/third_party/logfault"
       - cmake --build _build --parallel
-      - |
-        app_version="$(sed -nE 's/^project\(shared_desktop VERSION ([^ ]+) LANGUAGES CXX\)$/\1/p' desktop/CMakeLists.txt)"
-        sed "s/@APP_VERSION@/${app_version}/g" \
-          flatpak/local.shared.Shared.metainfo.xml.in > eu.lastviking.shared.metainfo.xml
-      - install -Dm755 _build/bin/sharedgui /app/bin/sharedgui
-      - install -Dm644 flatpak/local.shared.Shared.desktop /app/share/applications/eu.lastviking.shared.desktop
-      - install -Dm644 icons/shared-icon.svg /app/share/icons/hicolor/scalable/apps/eu.lastviking.shared.svg
-      - install -Dm644 eu.lastviking.shared.metainfo.xml /app/share/metainfo/eu.lastviking.shared.metainfo.xml
+      - cmake --install _build
     sources:
       - type: dir
         path: ..

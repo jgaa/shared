@@ -19,7 +19,7 @@
     <p>The application is designed for users operating across multiple hosts, virtual machines, and trust boundaries where local encrypted exchange is preferable to cloud relays.</p>
   </description>
   <releases>
-    <release version="@APP_VERSION@" />
+    <release version="@PROJECT_VERSION@" date="@SHARED_APPSTREAM_RELEASE_DATE@" />
   </releases>
   <content_rating type="oars-1.1" />
 </component>

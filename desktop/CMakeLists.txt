@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.28)
 
 project(shared_desktop VERSION 0.1.0 LANGUAGES CXX)
 
+set(SHARED_APP_ID "eu.lastviking.shared")
+string(TIMESTAMP SHARED_APPSTREAM_RELEASE_DATE "%Y-%m-%d" UTC)
+
 option(SHARED_BUILD_GUI "Build the Qt/QML desktop UI" ON)
 option(SHARED_BUILD_HEADLESS "Build the headless service frontend" OFF)
 option(SHARED_FLATPAK_BUILD "Build shared_desktop for Flatpak packaging" OFF)
@@ -114,4 +117,34 @@ endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
+endif()
+
+if(SHARED_BUILD_GUI)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/../flatpak/local.shared.Shared.metainfo.xml.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/${SHARED_APP_ID}.metainfo.xml"
+        @ONLY
+    )
+
+    install(
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/../flatpak/local.shared.Shared.desktop"
+        DESTINATION share/applications
+        RENAME "${SHARED_APP_ID}.desktop"
+    )
+    install(
+        FILES "${CMAKE_CURRENT_BINARY_DIR}/${SHARED_APP_ID}.metainfo.xml"
+        DESTINATION share/metainfo
+    )
+    install(
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/../icons/shared-icon-128.png"
+        DESTINATION share/icons/hicolor/128x128/apps
+        RENAME "${SHARED_APP_ID}.png"
+    )
+    if(NOT SHARED_FLATPAK_BUILD)
+        install(
+            FILES "${CMAKE_CURRENT_SOURCE_DIR}/../icons/shared-icon.svg"
+            DESTINATION share/icons/hicolor/scalable/apps
+            RENAME "${SHARED_APP_ID}.svg"
+        )
+    endif()
 endif()
