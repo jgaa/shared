@@ -34,6 +34,112 @@ namespace shared::desktop::gui {
 
 Q_LOGGING_CATEGORY(shared_gui_app_controller_log, "shared.desktop.gui.app_controller")
 
+verified_peers_model::verified_peers_model(QObject *parent)
+    : QAbstractListModel{parent}
+{
+}
+
+int verified_peers_model::rowCount(const QModelIndex &parent) const
+{
+    if (parent.isValid()) {
+        return 0;
+    }
+
+    return rows_.size();
+}
+
+QVariant verified_peers_model::data(const QModelIndex &index, int role) const
+{
+    if (!index.isValid() || index.row() < 0 || index.row() >= rows_.size()) {
+        return {};
+    }
+
+    const auto &row = rows_.at(index.row());
+    switch (role) {
+    case peer_id_role:
+        return row.peer_id;
+    case name_role:
+        return row.name;
+    case status_label_role:
+        return row.status_label;
+    case status_color_role:
+        return row.status_color;
+    case address_role:
+        return row.address;
+    case last_known_address_role:
+        return row.last_known_address;
+    case last_communicated_role:
+        return row.last_communicated;
+    default:
+        return {};
+    }
+}
+
+QHash<int, QByteArray> verified_peers_model::roleNames() const
+{
+    return {
+        {peer_id_role, "peer_id"},
+        {name_role, "name"},
+        {status_label_role, "status_label"},
+        {status_color_role, "status_color"},
+        {address_role, "address"},
+        {last_known_address_role, "last_known_address"},
+        {last_communicated_role, "last_communicated"},
+    };
+}
+
+void verified_peers_model::replace_rows(QList<peer_row> rows)
+{
+    if (rows == rows_) {
+        return;
+    }
+
+    auto changed = false;
+    auto index = 0;
+    while (index < rows_.size() && index < rows.size()) {
+        if (rows_.at(index) != rows.at(index)) {
+            rows_[index] = rows.at(index);
+            emit dataChanged(this->index(index, 0), this->index(index, 0));
+            changed = true;
+        }
+        ++index;
+    }
+
+    if (rows.size() < rows_.size()) {
+        beginRemoveRows({}, rows.size(), rows_.size() - 1);
+        rows_.erase(rows_.begin() + rows.size(), rows_.end());
+        endRemoveRows();
+        changed = true;
+    } else if (rows_.size() < rows.size()) {
+        beginInsertRows({}, rows_.size(), rows.size() - 1);
+        while (rows_.size() < rows.size()) {
+            rows_.append(rows.at(rows_.size()));
+        }
+        endInsertRows();
+        changed = true;
+    }
+
+    if (!changed) {
+        return;
+    }
+}
+
+void verified_peers_model::clear()
+{
+    if (rows_.isEmpty()) {
+        return;
+    }
+
+    beginRemoveRows({}, 0, rows_.size() - 1);
+    rows_.clear();
+    endRemoveRows();
+}
+
+const QList<verified_peers_model::peer_row> &verified_peers_model::rows() const
+{
+    return rows_;
+}
+
 namespace {
 
 void ensure_settings_ok(const QSettings &settings, const QString &message)
@@ -305,16 +411,20 @@ QString app_controller::trusted_agent_fingerprint() const
     return trusted_agent_fingerprint_;
 }
 
-QVariantList app_controller::verified_peers() const
+QAbstractListModel *app_controller::verified_peers() const
 {
-    return verified_peers_;
+    return const_cast<verified_peers_model *>(&verified_peers_);
+}
+
+int app_controller::verified_peer_count() const
+{
+    return verified_peers_.rowCount();
 }
 
 bool app_controller::copy_targets_available() const
 {
-    return std::any_of(verified_peers_.cbegin(), verified_peers_.cend(), [](const auto &peer) {
-        const auto row = peer.toMap();
-        return row.value(QStringLiteral("status_label")).toString() != QStringLiteral("Unavailable");
+    return std::any_of(verified_peers_.rows().cbegin(), verified_peers_.rows().cend(), [](const auto &peer) {
+        return peer.status_label != QStringLiteral("Unavailable");
     });
 }
 
@@ -958,12 +1068,11 @@ bool app_controller::send_clipboard_to_all()
     }
 
     QStringList peer_ids{};
-    for (const auto &peer : verified_peers_) {
-        const auto row = peer.toMap();
-        if (row.value(QStringLiteral("peer_id")).toString().isEmpty()) {
+    for (const auto &peer : verified_peers_.rows()) {
+        if (peer.peer_id.isEmpty()) {
             continue;
         }
-        peer_ids.append(row.value(QStringLiteral("peer_id")).toString());
+        peer_ids.append(peer.peer_id);
     }
 
     if (peer_ids.isEmpty()) {
@@ -1026,11 +1135,9 @@ bool app_controller::send_files_to_all(const QStringList &file_paths)
     }
 
     QStringList peer_ids{};
-    for (const auto &peer : verified_peers_) {
-        const auto row = peer.toMap();
-        const auto peer_id = row.value(QStringLiteral("peer_id")).toString();
-        if (!peer_id.isEmpty()) {
-            peer_ids.append(peer_id);
+    for (const auto &peer : verified_peers_.rows()) {
+        if (!peer.peer_id.isEmpty()) {
+            peer_ids.append(peer.peer_id);
         }
     }
 
@@ -1305,7 +1412,7 @@ void app_controller::refresh_log_lines()
 
 void app_controller::refresh_verified_peers()
 {
-    QVariantList next_peers{};
+    QList<verified_peers_model::peer_row> next_peers{};
 
     QString peer_list_error{};
     const auto peer_list = security_materials_.current_peer_list(peer_list_error);
@@ -1364,37 +1471,40 @@ void app_controller::refresh_verified_peers()
             status_color = QStringLiteral("#b23a2e");
         }
 
-        QVariantMap row{};
-        row.insert(QStringLiteral("peer_id"), peer_id);
-        row.insert(QStringLiteral("name"), entry.identity().name());
-        row.insert(QStringLiteral("status_label"), status_label);
-        row.insert(QStringLiteral("status_color"), status_color);
-
         const auto address = status.value(QStringLiteral("address")).toString();
         const auto port = status.value(QStringLiteral("port")).toInt();
-        row.insert(
-            QStringLiteral("address"),
-            address.isEmpty() || port <= 0
-                ? QString{}
-                : QStringLiteral("%1:%2").arg(address).arg(port));
         const auto last_known_ip = status.value(QStringLiteral("last_known_ip")).toString();
         const auto last_known_port = status.value(QStringLiteral("last_known_port")).toInt();
-        row.insert(
-            QStringLiteral("last_known_address"),
-            last_known_ip.isEmpty() || last_known_port <= 0
+        next_peers.append({
+            .peer_id = peer_id,
+            .name = entry.identity().name(),
+            .status_label = status_label,
+            .status_color = status_color,
+            .address = address.isEmpty() || port <= 0
+                ? QString{}
+                : QStringLiteral("%1:%2").arg(address).arg(port),
+            .last_known_address = last_known_ip.isEmpty() || last_known_port <= 0
                 ? last_known_ip
-                : QStringLiteral("%1:%2").arg(last_known_ip).arg(last_known_port));
-        row.insert(
-            QStringLiteral("last_communicated"),
-            format_elapsed(status.value(QStringLiteral("last_communication_time_ms")).toString().toLongLong()));
-        next_peers.append(row);
+                : QStringLiteral("%1:%2").arg(last_known_ip).arg(last_known_port),
+            .last_communicated = format_elapsed(
+                status.value(QStringLiteral("last_communication_time_ms")).toString().toLongLong()),
+        });
     }
 
-    if (next_peers == verified_peers_) {
-        return;
+    if (next_peers.size() == verified_peers_.rowCount()) {
+        auto identical = true;
+        for (auto i = 0; i < next_peers.size(); ++i) {
+            if (next_peers.at(i) != verified_peers_.rows().at(i)) {
+                identical = false;
+                break;
+            }
+        }
+        if (identical) {
+            return;
+        }
     }
 
-    verified_peers_ = next_peers;
+    verified_peers_.replace_rows(std::move(next_peers));
     emit peers_changed();
 }
 

@@ -37,6 +37,7 @@ Dialog {
             border.color: "#d2c7b6"
 
             ListView {
+                id: verified_peers_list
                 anchors.fill: parent
                 anchors.margins: 10
                 clip: true
@@ -44,8 +45,6 @@ Dialog {
                 model: app_controller.verified_peers
 
                 delegate: Frame {
-                    required property var modelData
-
                     width: ListView.view.width
 
                     RowLayout {
@@ -57,7 +56,7 @@ Dialog {
                             width: 14
                             height: 14
                             radius: 7
-                            color: modelData.status_color
+                            color: status_color
                         }
 
                         ColumnLayout {
@@ -65,27 +64,27 @@ Dialog {
                             spacing: 4
 
                             Label {
-                                text: modelData.name
+                                text: name
                                 font.bold: true
                                 Layout.fillWidth: true
                             }
 
                             Label {
-                                text: modelData.peer_id
+                                text: peer_id
                                 color: palette.mid
                                 wrapMode: Text.WrapAnywhere
                                 Layout.fillWidth: true
                             }
 
                             Label {
-                                visible: modelData.address.length > 0
-                                text: modelData.address
+                                visible: address.length > 0
+                                text: address
                                 Layout.fillWidth: true
                             }
 
                             Label {
-                                visible: modelData.last_known_address.length > 0
-                                text: "Last known IP: " + modelData.last_known_address
+                                visible: last_known_address.length > 0
+                                text: "Last known IP: " + last_known_address
                                 color: palette.mid
                                 wrapMode: Text.WrapAnywhere
                                 Layout.fillWidth: true
@@ -97,13 +96,13 @@ Dialog {
                             spacing: 4
 
                             Label {
-                                text: modelData.status_label
-                                color: modelData.status_color
+                                text: status_label
+                                color: status_color
                                 font.bold: true
                             }
 
                             Label {
-                                text: "Last: " + modelData.last_communicated
+                                text: "Last: " + last_communicated
                                 color: palette.mid
                             }
 
@@ -112,8 +111,8 @@ Dialog {
                                 text: "Delete"
                                 icon.name: "edit-delete"
                                 onClicked: {
-                                    root.pendingRemovalPeerId = modelData.peer_id
-                                    root.pendingRemovalPeerName = modelData.name
+                                    root.pendingRemovalPeerId = peer_id
+                                    root.pendingRemovalPeerName = name
                                     confirm_remove_dialog.open()
                                 }
                             }
@@ -124,7 +123,7 @@ Dialog {
 
             Label {
                 anchors.centerIn: parent
-                visible: app_controller.verified_peers.length === 0
+                visible: app_controller.verified_peer_count === 0
                 text: "No verified peers are available yet."
                 color: palette.mid
             }

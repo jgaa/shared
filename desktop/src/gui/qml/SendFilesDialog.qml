@@ -66,20 +66,18 @@ Dialog {
                 spacing: 8
 
                 Repeater {
-                    model: root.controller ? root.controller.verified_peers : []
+                    model: root.controller ? root.controller.verified_peers : null
 
                     delegate: RadioButton {
-                        required property var modelData
-
-                        text: modelData.name + (modelData.address.length > 0 ? " (" + modelData.address + ")" : "")
-                        checked: root.selectedPeerId === modelData.peer_id
-                        enabled: modelData.status_label !== "Unavailable"
-                        onClicked: root.selectedPeerId = modelData.peer_id
+                        text: name + (address.length > 0 ? " (" + address + ")" : "")
+                        checked: root.selectedPeerId === peer_id
+                        enabled: status_label !== "Unavailable"
+                        onClicked: root.selectedPeerId = peer_id
                     }
                 }
 
                 Label {
-                    visible: (root.controller ? root.controller.verified_peers.length : 0) === 0
+                    visible: (root.controller ? root.controller.verified_peer_count : 0) === 0
                     text: "No verified peers are available yet."
                     color: palette.mid
                     Layout.fillWidth: true

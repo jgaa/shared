@@ -8,6 +8,7 @@
 #include "shared/desktop/core/security_materials.h"
 #include "shared/desktop/core/settings_repository.h"
 
+#include <QtCore/QAbstractListModel>
 #include <QtCore/QObject>
 #include <QtCore/QString>
 #include <QtCore/QStringList>
@@ -24,6 +25,47 @@ class daemon_application;
 }
 
 namespace shared::desktop::gui {
+
+class verified_peers_model final : public QAbstractListModel {
+    Q_OBJECT
+
+public:
+    enum role {
+        peer_id_role = Qt::UserRole + 1,
+        name_role,
+        status_label_role,
+        status_color_role,
+        address_role,
+        last_known_address_role,
+        last_communicated_role,
+    };
+    Q_ENUM(role)
+
+    struct peer_row {
+        QString peer_id{};
+        QString name{};
+        QString status_label{};
+        QString status_color{};
+        QString address{};
+        QString last_known_address{};
+        QString last_communicated{};
+
+        [[nodiscard]] bool operator==(const peer_row &other) const = default;
+    };
+
+    explicit verified_peers_model(QObject *parent = nullptr);
+
+    [[nodiscard]] int rowCount(const QModelIndex &parent = {}) const override;
+    [[nodiscard]] QVariant data(const QModelIndex &index, int role) const override;
+    [[nodiscard]] QHash<int, QByteArray> roleNames() const override;
+
+    void replace_rows(QList<peer_row> rows);
+    void clear();
+    [[nodiscard]] const QList<peer_row> &rows() const;
+
+private:
+    QList<peer_row> rows_{};
+};
 
 class app_controller final : public QObject {
     Q_OBJECT
@@ -47,7 +89,8 @@ class app_controller final : public QObject {
     Q_PROPERTY(int trusted_agent_port READ trusted_agent_port WRITE set_trusted_agent_port NOTIFY state_changed)
     Q_PROPERTY(int trusted_agent_peer_port READ trusted_agent_peer_port WRITE set_trusted_agent_peer_port NOTIFY state_changed)
     Q_PROPERTY(QString trusted_agent_fingerprint READ trusted_agent_fingerprint NOTIFY state_changed)
-    Q_PROPERTY(QVariantList verified_peers READ verified_peers NOTIFY peers_changed)
+    Q_PROPERTY(QAbstractListModel* verified_peers READ verified_peers CONSTANT)
+    Q_PROPERTY(int verified_peer_count READ verified_peer_count NOTIFY peers_changed)
     Q_PROPERTY(bool copy_targets_available READ copy_targets_available NOTIFY peers_changed)
     Q_PROPERTY(QString last_error READ last_error NOTIFY state_changed)
     Q_PROPERTY(QVariantList pending_requests READ pending_requests NOTIFY state_changed)
@@ -100,7 +143,8 @@ public:
     [[nodiscard]] int trusted_agent_port() const;
     [[nodiscard]] int trusted_agent_peer_port() const;
     [[nodiscard]] QString trusted_agent_fingerprint() const;
-    [[nodiscard]] QVariantList verified_peers() const;
+    [[nodiscard]] QAbstractListModel *verified_peers() const;
+    [[nodiscard]] int verified_peer_count() const;
     [[nodiscard]] bool copy_targets_available() const;
     [[nodiscard]] QString last_error() const;
     [[nodiscard]] QVariantList pending_requests() const;
@@ -242,7 +286,7 @@ private:
     core::settings_repository settings_repository_{};
     core::agent_configuration configuration_{};
     QString trusted_agent_fingerprint_{};
-    QVariantList verified_peers_{};
+    verified_peers_model verified_peers_{this};
     QString last_error_{};
     int clipboard_limit_megabytes_{};
     QStringList log_lines_{};
