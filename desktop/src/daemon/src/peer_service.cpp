@@ -107,24 +107,6 @@ std::optional<quint64> existing_observed_time_ms(
     return std::nullopt;
 }
 
-QList<shared::v1::PeerAddress> filtered_addresses_for_gossip(
-    const QString &local_peer_id,
-    const QString &hinted_peer_id,
-    const QList<shared::v1::PeerAddress> &addresses)
-{
-    if (hinted_peer_id == local_peer_id) {
-        return addresses;
-    }
-
-    QList<shared::v1::PeerAddress> filtered{};
-    for (const auto &address : addresses) {
-        if (address.source() != QStringLiteral("local")) {
-            filtered.append(address);
-        }
-    }
-    return filtered;
-}
-
 int address_source_priority(const QString &source)
 {
     if (source == QStringLiteral("manual")) {
@@ -1273,8 +1255,7 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 {
     const auto all_addresses = known_addresses_with_live_sessions();
     for (auto it = all_addresses.begin(); it != all_addresses.end(); ++it) {
-        const auto gossip_addresses = filtered_addresses_for_gossip(configuration_.peer_id, it.key(), it.value());
-        if (gossip_addresses.isEmpty()) {
+        if (it.value().isEmpty()) {
             continue;
         }
 
@@ -1283,13 +1264,13 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 
         shared::v1::AddressHint address_hint{};
         address_hint.setPeerId(peer_id);
-        address_hint.setAddresses(gossip_addresses);
+        address_hint.setAddresses(it.value());
 
         qCDebug(shared_peer_service_log)
             << "Sending known address hints"
             << "target_peer=" << sessions_.value(socket).remote_peer_id
             << "hinted_peer_id=" << it.key()
-            << "address_count=" << gossip_addresses.size();
+            << "address_count=" << it.value().size();
 
         auto envelope = make_envelope(next_message_id());
         envelope.setAddressHint(address_hint);
@@ -3668,14 +3649,9 @@ void peer_service::merge_claimed_addresses(
     shared::v1::PeerId hinted_peer_id{};
     hinted_peer_id.setUuid(peer_id);
 
-    const auto gossip_addresses = filtered_addresses_for_gossip(configuration_.peer_id, peer_id, addresses);
-    if (gossip_addresses.isEmpty()) {
-        return;
-    }
-
     shared::v1::AddressHint address_hint{};
     address_hint.setPeerId(hinted_peer_id);
-    address_hint.setAddresses(gossip_addresses);
+    address_hint.setAddresses(addresses);
     broadcast_address_hint(address_hint, exclude_socket);
 }
 

@@ -184,8 +184,8 @@ Address hints are gossiped to all authenticated peers whenever local address kno
 
 Current desktop behavior:
 
-* a peer advertises its own `local` addresses directly to connected peers
-* relays do not rebroadcast another peer's `local` addresses to third parties
+* a peer advertises its own `local` addresses to connected peers
+* peers rebroadcast `local` addresses like other address hints
 * outbound connection attempts prefer `manual`, then `direct`, then `local`, then other hints
 * outbound connection attempts skip candidates matching the local peer's own advertised interface addresses
 
