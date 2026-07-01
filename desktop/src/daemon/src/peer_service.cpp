@@ -2013,8 +2013,8 @@ void peer_service::handle_relay_envelope(QSslSocket *socket, const shared::v1::R
 
     const auto source_peer_id = relay_envelope.sourcePeerId().uuid().trimmed();
     const auto destination_peer_id = relay_envelope.destinationPeerId().uuid().trimmed();
-    if (source_peer_id != session.remote_peer_id) {
-        close_socket(socket, QStringLiteral("Relay envelope source does not match authenticated peer"));
+    if (source_peer_id.isEmpty()) {
+        close_socket(socket, QStringLiteral("Relay envelope source peer id is empty"));
         return;
     }
 
