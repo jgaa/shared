@@ -28,6 +28,7 @@ add_library(sharedcore STATIC
     include/shared/desktop/core/log_capture.h
     include/shared/desktop/core/logging.h
     include/shared/desktop/core/logging_controller.h
+    include/shared/desktop/core/local_peer_addresses.h
     include/shared/desktop/core/pending_enrollment_repository.h
     include/shared/desktop/core/security_materials.h
     include/shared/desktop/core/settings_repository.h
@@ -38,6 +39,7 @@ add_library(sharedcore STATIC
     src/envelope_io.cpp
     src/log_capture.cpp
     src/logging_controller.cpp
+    src/local_peer_addresses.cpp
     src/pending_enrollment_repository.cpp
     src/security_materials.cpp
     src/app_paths.cpp

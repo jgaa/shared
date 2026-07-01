@@ -166,6 +166,7 @@ After authentication succeeds, the current desktop peer:
 The current implementation uses these address sources:
 
 * manually configured trusted-agent address
+* current non-loopback local interface addresses, excluding container-only interfaces
 * directly observed peer socket address
 * `PeerInfo.known_addresses`
 * `AddressHint`
@@ -175,10 +176,18 @@ The current implementation uses these address sources:
 Current desktop values include:
 
 * `direct`
+* `local`
 * `manual`
 * any source string received from another peer
 
 Address hints are gossiped to all authenticated peers whenever local address knowledge changes.
+
+Current desktop behavior:
+
+* a peer advertises its own `local` addresses directly to connected peers
+* relays do not rebroadcast another peer's `local` addresses to third parties
+* outbound connection attempts prefer `manual`, then `direct`, then `local`, then other hints
+* outbound connection attempts skip candidates matching the local peer's own advertised interface addresses
 
 ## Reachability and Relay Discovery
 

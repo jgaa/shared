@@ -3,6 +3,7 @@
 #include "shared/desktop/core/configuration_repository.h"
 #include "shared/desktop/core/envelope_io.h"
 #include "shared/desktop/core/logging_controller.h"
+#include "shared/desktop/core/local_peer_addresses.h"
 #include "shared/desktop/core/pending_enrollment_repository.h"
 #include "shared/desktop/core/security_materials.h"
 #include "shared/desktop/core/transfer_crypto.h"
@@ -107,6 +108,7 @@ private slots:
     void configuration_repository_round_trip();
     void pending_enrollment_repository_round_trip();
     void address_hint_repository_round_trip();
+    void local_peer_addresses_filters_loopback_and_container_interfaces();
     void enrollment_fingerprint_normalization();
     void logging_controller_levels();
     void security_materials_bootstrap_flow();
@@ -308,6 +310,99 @@ void sharedcore_tests::address_hint_repository_round_trip()
     QCOMPARE(restarted_loaded.first().ip(), QStringLiteral("10.0.0.10"));
     QCOMPARE(restarted_loaded.first().port(), static_cast<quint32>(47124));
     QCOMPARE(restarted_loaded.first().observedTimeMs(), static_cast<quint64>(2000));
+
+    shared::v1::PeerAddress manual{};
+    manual.setIp(QStringLiteral("198.51.100.10"));
+    manual.setPort(47124);
+    manual.setSource(QStringLiteral("manual"));
+    manual.setObservedTimeMs(3000);
+    repository.merge_address(QStringLiteral("peer-1"), manual, changed);
+    QVERIFY(changed);
+
+    shared::v1::PeerAddress local{};
+    local.setIp(QStringLiteral("192.168.1.10"));
+    local.setPort(47124);
+    local.setSource(QStringLiteral("local"));
+    local.setObservedTimeMs(0);
+    repository.replace_source_addresses(QStringLiteral("peer-1"), QStringLiteral("local"), {local}, changed);
+    QVERIFY(changed);
+
+    changed = false;
+    repository.replace_source_addresses(QStringLiteral("peer-1"), QStringLiteral("local"), {local}, changed);
+    QVERIFY(!changed);
+
+    shared::v1::PeerAddress updated_local = local;
+    updated_local.setIp(QStringLiteral("10.0.0.20"));
+    repository.replace_source_addresses(
+        QStringLiteral("peer-1"),
+        QStringLiteral("local"),
+        {updated_local},
+        changed);
+    QVERIFY(changed);
+
+    const auto with_local = repository.load_for_peer(QStringLiteral("peer-1"));
+    QCOMPARE(with_local.size(), 3);
+    QCOMPARE(with_local.at(0).ip(), QStringLiteral("10.0.0.10"));
+    QCOMPARE(with_local.at(1).ip(), QStringLiteral("198.51.100.10"));
+    QCOMPARE(with_local.at(2).ip(), QStringLiteral("10.0.0.20"));
+    QCOMPARE(with_local.at(2).source(), QStringLiteral("local"));
+}
+
+void sharedcore_tests::local_peer_addresses_filters_loopback_and_container_interfaces()
+{
+    QList<shared::desktop::core::local_interface_address> candidates{
+        {
+            QStringLiteral("wlan0"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("192.168.1.20")},
+        },
+        {
+            QStringLiteral("eth0"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("fd00::20")},
+        },
+        {
+            QStringLiteral("lo"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning | QNetworkInterface::IsLoopBack,
+            QHostAddress{QStringLiteral("127.0.0.1")},
+        },
+        {
+            QStringLiteral("docker0"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("172.17.0.1")},
+        },
+        {
+            QStringLiteral("veth7c1d"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("10.244.0.1")},
+        },
+        {
+            QStringLiteral("eth0"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("fe80::1234")},
+        },
+        {
+            QStringLiteral("eth0"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("169.254.10.2")},
+        },
+        {
+            QStringLiteral("wlan0"),
+            QNetworkInterface::IsUp | QNetworkInterface::IsRunning,
+            QHostAddress{QStringLiteral("192.168.1.20")},
+        },
+    };
+
+    const auto addresses = shared::desktop::core::local_peer_addresses_for_candidates(47124, candidates);
+    QCOMPARE(addresses.size(), 2);
+    QCOMPARE(addresses.at(0).ip(), QStringLiteral("192.168.1.20"));
+    QCOMPARE(addresses.at(0).port(), static_cast<quint32>(47124));
+    QCOMPARE(addresses.at(0).source(), QStringLiteral("local"));
+    QCOMPARE(addresses.at(0).observedTimeMs(), static_cast<quint64>(0));
+    QCOMPARE(addresses.at(1).ip(), QStringLiteral("fd00::20"));
+    QCOMPARE(addresses.at(1).port(), static_cast<quint32>(47124));
+    QCOMPARE(addresses.at(1).source(), QStringLiteral("local"));
+    QCOMPARE(addresses.at(1).observedTimeMs(), static_cast<quint64>(0));
 }
 
 void sharedcore_tests::enrollment_fingerprint_normalization()

@@ -24,6 +24,11 @@ public:
         const QString &peer_id,
         const QList<shared::v1::PeerAddress> &addresses,
         bool &changed) const;
+    void replace_source_addresses(
+        const QString &peer_id,
+        const QString &source,
+        const QList<shared::v1::PeerAddress> &addresses,
+        bool &changed) const;
 
 private:
     [[nodiscard]] QHash<QString, QList<shared::v1::PeerAddress>> read_file() const;

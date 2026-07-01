@@ -1,6 +1,7 @@
 #include "peer_service.h"
 
 #include "shared/desktop/core/envelope_io.h"
+#include "shared/desktop/core/local_peer_addresses.h"
 
 #include <QCoroIODevice>
 #include <QCoroSignal>
@@ -106,6 +107,62 @@ std::optional<quint64> existing_observed_time_ms(
     return std::nullopt;
 }
 
+QList<shared::v1::PeerAddress> filtered_addresses_for_gossip(
+    const QString &local_peer_id,
+    const QString &hinted_peer_id,
+    const QList<shared::v1::PeerAddress> &addresses)
+{
+    if (hinted_peer_id == local_peer_id) {
+        return addresses;
+    }
+
+    QList<shared::v1::PeerAddress> filtered{};
+    for (const auto &address : addresses) {
+        if (address.source() != QStringLiteral("local")) {
+            filtered.append(address);
+        }
+    }
+    return filtered;
+}
+
+int address_source_priority(const QString &source)
+{
+    if (source == QStringLiteral("manual")) {
+        return 0;
+    }
+    if (source == QStringLiteral("direct")) {
+        return 1;
+    }
+    if (source == QStringLiteral("local")) {
+        return 2;
+    }
+    return 3;
+}
+
+QList<shared::v1::PeerAddress> prioritized_addresses(QList<shared::v1::PeerAddress> addresses)
+{
+    std::stable_sort(
+        addresses.begin(),
+        addresses.end(),
+        [](const shared::v1::PeerAddress &left, const shared::v1::PeerAddress &right) {
+            return address_source_priority(left.source()) < address_source_priority(right.source());
+        });
+    return addresses;
+}
+
+bool is_self_advertised_address(
+    const QList<shared::v1::PeerAddress> &local_addresses,
+    const shared::v1::PeerAddress &candidate)
+{
+    for (const auto &local_address : local_addresses) {
+        if (local_address.ip() == candidate.ip()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 }
 
 peer_service::peer_service(
@@ -159,6 +216,7 @@ bool peer_service::start(QString &error_message)
 
     current_peer_list_version_ = peer_list.version();
     current_peer_list_bytes_ = serialize_peer_list(peer_list);
+    refresh_local_address_hints();
 
     if (!configure_server(error_message)) {
         return false;
@@ -920,6 +978,7 @@ void peer_service::send_keepalives()
 
 void peer_service::republish_known_address_hints()
 {
+    refresh_local_address_hints();
     auto sent_any = false;
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
         if (!it.value().authenticated) {
@@ -1214,7 +1273,8 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 {
     const auto all_addresses = known_addresses_with_live_sessions();
     for (auto it = all_addresses.begin(); it != all_addresses.end(); ++it) {
-        if (it.value().isEmpty()) {
+        const auto gossip_addresses = filtered_addresses_for_gossip(configuration_.peer_id, it.key(), it.value());
+        if (gossip_addresses.isEmpty()) {
             continue;
         }
 
@@ -1223,13 +1283,13 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 
         shared::v1::AddressHint address_hint{};
         address_hint.setPeerId(peer_id);
-        address_hint.setAddresses(it.value());
+        address_hint.setAddresses(gossip_addresses);
 
         qCDebug(shared_peer_service_log)
             << "Sending known address hints"
             << "target_peer=" << sessions_.value(socket).remote_peer_id
             << "hinted_peer_id=" << it.key()
-            << "address_count=" << it.value().size();
+            << "address_count=" << gossip_addresses.size();
 
         auto envelope = make_envelope(next_message_id());
         envelope.setAddressHint(address_hint);
@@ -1282,6 +1342,20 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
     }
 
     return all_addresses;
+}
+
+void peer_service::refresh_local_address_hints()
+{
+    const auto local_addresses = core::local_peer_addresses(configuration_.peer_port);
+    bool changed{};
+    address_hint_repository_.replace_source_addresses(
+        configuration_.peer_id,
+        QStringLiteral("local"),
+        local_addresses,
+        changed);
+    if (changed) {
+        write_peer_status_snapshot();
+    }
 }
 
 void peer_service::send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms)
@@ -2909,6 +2983,7 @@ void peer_service::maybe_connect_to_peer(
     const QList<shared::v1::PeerAddress> &addresses)
 {
     const auto peer_id = peer.identity().peerId().uuid();
+    const auto local_addresses = core::local_peer_addresses(configuration_.peer_port);
     if (has_session_for_peer(peer_id)) {
         qCDebug(shared_peer_service_log)
             << "Skipping outbound peer connection"
@@ -2918,12 +2993,12 @@ void peer_service::maybe_connect_to_peer(
         return;
     }
 
-    if (pending_connections_.contains(peer_id)) {
+    if (has_socket_for_peer(peer_id)) {
         qCDebug(shared_peer_service_log)
             << "Skipping outbound peer connection"
             << "peer_id=" << peer_id
             << "name=" << peer.identity().name()
-            << "reason=" << "connection-pending";
+            << "reason=" << "connection-open-or-pending";
         return;
     }
 
@@ -2940,7 +3015,7 @@ void peer_service::maybe_connect_to_peer(
         return;
     }
 
-    for (const auto &address : addresses) {
+    for (const auto &address : prioritized_addresses(addresses)) {
         if (address.ip().isEmpty() || address.port() == 0) {
             qCDebug(shared_peer_service_log)
                 << "Skipping peer address candidate"
@@ -2950,6 +3025,18 @@ void peer_service::maybe_connect_to_peer(
                 << "port=" << address.port()
                 << "source=" << address.source()
                 << "reason=" << "invalid-address";
+            continue;
+        }
+
+        if (is_self_advertised_address(local_addresses, address)) {
+            qCDebug(shared_peer_service_log)
+                << "Skipping peer address candidate"
+                << "peer_id=" << peer_id
+                << "name=" << peer.identity().name()
+                << "ip=" << address.ip()
+                << "port=" << address.port()
+                << "source=" << address.source()
+                << "reason=" << "self-address";
             continue;
         }
 
@@ -3000,6 +3087,17 @@ bool peer_service::has_session_for_peer(const QString &peer_id) const
     }
 
     return false;
+}
+
+bool peer_service::has_socket_for_peer(const QString &peer_id) const
+{
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (it.value().target_peer_id == peer_id || it.value().remote_peer_id == peer_id) {
+            return true;
+        }
+    }
+
+    return pending_connections_.contains(peer_id);
 }
 
 bool peer_service::is_outbound_attempt_deferred(const QString &peer_id, const QString &peer_name) const
@@ -3564,15 +3662,21 @@ void peer_service::merge_claimed_addresses(
         return;
     }
 
+    write_peer_status_snapshot();
+    attempt_connections();
+
     shared::v1::PeerId hinted_peer_id{};
     hinted_peer_id.setUuid(peer_id);
 
+    const auto gossip_addresses = filtered_addresses_for_gossip(configuration_.peer_id, peer_id, addresses);
+    if (gossip_addresses.isEmpty()) {
+        return;
+    }
+
     shared::v1::AddressHint address_hint{};
     address_hint.setPeerId(hinted_peer_id);
-    address_hint.setAddresses(addresses);
-    write_peer_status_snapshot();
+    address_hint.setAddresses(gossip_addresses);
     broadcast_address_hint(address_hint, exclude_socket);
-    attempt_connections();
 }
 
 QSslSocket *peer_service::authenticated_socket_for_peer(const QString &peer_id) const

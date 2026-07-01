@@ -48,6 +48,24 @@ bool addresses_match(const shared::v1::PeerAddress &left, const shared::v1::Peer
         && left.source() == right.source();
 }
 
+bool address_lists_match(
+    const QList<shared::v1::PeerAddress> &left,
+    const QList<shared::v1::PeerAddress> &right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+
+    for (qsizetype index = 0; index < left.size(); ++index) {
+        if (!addresses_match(left.at(index), right.at(index))
+            || left.at(index).observedTimeMs() != right.at(index).observedTimeMs()) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 }
 
 address_hint_repository::address_hint_repository(const app_paths &app_paths)
@@ -113,6 +131,59 @@ void address_hint_repository::merge_addresses(
     }
 
     all_addresses.insert(peer_id, peer_addresses);
+    write_file(all_addresses);
+}
+
+void address_hint_repository::replace_source_addresses(
+    const QString &peer_id,
+    const QString &source,
+    const QList<shared::v1::PeerAddress> &addresses,
+    bool &changed) const
+{
+    changed = false;
+    if (peer_id.isEmpty() || source.isEmpty()) {
+        return;
+    }
+
+    auto all_addresses = read_file();
+    const auto peer_addresses = all_addresses.value(peer_id);
+
+    QList<shared::v1::PeerAddress> updated_addresses{};
+    for (const auto &existing : peer_addresses) {
+        if (existing.source() != source) {
+            updated_addresses.append(existing);
+        }
+    }
+
+    for (const auto &address : addresses) {
+        if (address.ip().isEmpty() || address.port() == 0 || address.source() != source) {
+            continue;
+        }
+
+        auto already_present = false;
+        for (const auto &existing : updated_addresses) {
+            if (addresses_match(existing, address)
+                && existing.observedTimeMs() == address.observedTimeMs()) {
+                already_present = true;
+                break;
+            }
+        }
+
+        if (!already_present) {
+            updated_addresses.append(address);
+        }
+    }
+
+    if (address_lists_match(peer_addresses, updated_addresses)) {
+        return;
+    }
+
+    if (updated_addresses.isEmpty()) {
+        all_addresses.remove(peer_id);
+    } else {
+        all_addresses.insert(peer_id, updated_addresses);
+    }
+    changed = true;
     write_file(all_addresses);
 }
 

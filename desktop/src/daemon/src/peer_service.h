@@ -227,6 +227,7 @@ private:
     void send_current_peer_list(QSslSocket *socket);
     void send_known_address_hints(QSslSocket *socket);
     [[nodiscard]] QHash<QString, QList<shared::v1::PeerAddress>> known_addresses_with_live_sessions() const;
+    void refresh_local_address_hints();
     void send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms = 0);
     void send_current_reachability(QSslSocket *socket);
     void broadcast_peer_list(QSslSocket *exclude_socket = nullptr);
@@ -303,6 +304,7 @@ private:
         const shared::v1::PeerListEntry &peer,
         const QList<shared::v1::PeerAddress> &addresses);
     [[nodiscard]] bool has_session_for_peer(const QString &peer_id) const;
+    [[nodiscard]] bool has_socket_for_peer(const QString &peer_id) const;
     [[nodiscard]] bool is_outbound_attempt_deferred(
         const QString &peer_id,
         const QString &peer_name) const;
