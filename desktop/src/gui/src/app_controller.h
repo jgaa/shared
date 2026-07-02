@@ -239,6 +239,7 @@ public:
     Q_INVOKABLE bool send_clipboard_to_all();
     Q_INVOKABLE bool send_clipboard_to_peer(const QString &peer_id);
     Q_INVOKABLE QStringList select_files();
+    Q_INVOKABLE QStringList stage_dropped_files(const QStringList &file_paths);
     Q_INVOKABLE bool send_files_to_all(const QStringList &file_paths);
     Q_INVOKABLE bool send_files_to_peer(const QString &peer_id, const QStringList &file_paths);
     Q_INVOKABLE bool remove_authorized_peer(const QString &peer_id);

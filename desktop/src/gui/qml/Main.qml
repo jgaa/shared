@@ -495,7 +495,12 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 enabled: app_controller.copy_targets_available
                                 onDropped: function(drop) {
-                                    const selected = window.droppedUrlsToStrings(drop.urls)
+                                    const dropped = window.droppedUrlsToStrings(drop.urls)
+                                    if (dropped.length === 0) {
+                                        return
+                                    }
+
+                                    const selected = app_controller.stage_dropped_files(dropped)
                                     if (selected.length === 0) {
                                         return
                                     }
@@ -527,7 +532,12 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 enabled: app_controller.copy_targets_available
                                 onDropped: function(drop) {
-                                    const selected = window.droppedUrlsToStrings(drop.urls)
+                                    const dropped = window.droppedUrlsToStrings(drop.urls)
+                                    if (dropped.length === 0) {
+                                        return
+                                    }
+
+                                    const selected = app_controller.stage_dropped_files(dropped)
                                     if (selected.length === 0) {
                                         return
                                     }

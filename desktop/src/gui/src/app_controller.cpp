@@ -352,6 +352,28 @@ QStringList normalized_local_file_paths(const QStringList &paths)
     return normalized;
 }
 
+bool is_staged_transfer_file(const QString &cache_dir, const QString &path)
+{
+    const QFileInfo path_info{path};
+    if (!path_info.exists() || !path_info.isFile()) {
+        return false;
+    }
+
+    const auto outgoing_root = QDir{cache_dir}.filePath(QStringLiteral("outgoing-files"));
+    const auto canonical_path = path_info.canonicalFilePath();
+    if (canonical_path.isEmpty()) {
+        return false;
+    }
+
+    const auto canonical_root = QFileInfo{outgoing_root}.canonicalFilePath();
+    if (canonical_root.isEmpty()) {
+        return false;
+    }
+
+    return canonical_path == canonical_root
+        || canonical_path.startsWith(canonical_root + QDir::separator());
+}
+
 QString unique_staging_path(const QString &directory_path, const QString &filename)
 {
     QFileInfo filename_info{filename};
@@ -1342,6 +1364,20 @@ QStringList app_controller::select_files()
     return normalize_selected_file_inputs(selected);
 }
 
+QStringList app_controller::stage_dropped_files(const QStringList &file_paths)
+{
+    QString error_message{};
+    const auto staged_files = stage_files_for_transfer(file_paths, error_message);
+    if (staged_files.isEmpty()) {
+        set_last_error(error_message.isEmpty()
+            ? QStringLiteral("No readable files were dropped")
+            : error_message);
+        return {};
+    }
+
+    return staged_files;
+}
+
 bool app_controller::send_files_to_all(const QStringList &file_paths)
 {
     if (service_ == nullptr) {
@@ -1633,8 +1669,19 @@ QStringList app_controller::stage_files_for_transfer(const QStringList &file_inp
     for (const auto &source_path : normalized_paths) {
         QFileInfo source_info{source_path};
         if (!source_info.exists() || !source_info.isFile()) {
+#if SHARED_FLATPAK_BUILD
+            error_message = QStringLiteral(
+                "Selected file is not accessible from the Flatpak sandbox or is no longer available: %1")
+                                .arg(source_path);
+#else
             error_message = QStringLiteral("Selected file is no longer available: %1").arg(source_path);
+#endif
             return {};
+        }
+
+        if (is_staged_transfer_file(app_paths_.cache_dir(), source_path)) {
+            staged_paths.append(source_path);
+            continue;
         }
 
         QFile source_file{source_path};
