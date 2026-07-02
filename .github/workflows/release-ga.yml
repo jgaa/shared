@@ -42,7 +42,7 @@ jobs:
           artifact_name="shared-flatpak-${app_version}"
           bundle_name="shared-${app_version}.flatpak"
 
-          previous_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+          previous_tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null)" || previous_tag=""
 
           {
             echo "app_version=${app_version}"
