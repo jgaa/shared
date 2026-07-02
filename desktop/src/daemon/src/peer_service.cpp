@@ -46,6 +46,7 @@ constexpr auto reachability_ttl_ms{90000};
 constexpr auto topology_ttl_ms{90000};
 constexpr auto reachability_broadcast_min_delay_ms{500};
 constexpr auto reachability_broadcast_max_delay_ms{1500};
+constexpr auto outbound_connect_timeout_ms{10000};
 constexpr qint64 outbound_retry_initial_delay_ms{5000};
 constexpr qint64 outbound_retry_max_delay_ms{5 * 60 * 1000};
 
@@ -1212,6 +1213,13 @@ void peer_service::close_socket(QSslSocket *socket, const QString &reason)
     }
 
     auto &session = session_it.value();
+    if (session.closing) {
+        return;
+    }
+
+    session.closing = true;
+    session.buffer.clear();
+    session.pending_pre_auth_messages.clear();
     if (session.outbound
         && !session.authenticated
         && !session.target_peer_id.isEmpty()
@@ -1231,6 +1239,11 @@ void peer_service::close_socket(QSslSocket *socket, const QString &reason)
         << "port=" << socket->peerPort()
         << "reason=" << reason;
     socket_send_states_.remove(socket);
+    if (session.outbound && !session.authenticated) {
+        socket->abort();
+        return;
+    }
+
     socket->disconnectFromHost();
 }
 
@@ -1658,6 +1671,11 @@ void peer_service::handle_socket_ready_read(QSslSocket *socket)
         return;
     }
 
+    if (session_it->closing) {
+        socket->readAll();
+        return;
+    }
+
     session_it->buffer.append(socket->readAll());
     qCInfo(shared_peer_service_log)
         << "received peer bytes"
@@ -1854,6 +1872,7 @@ void peer_service::handle_disconnected(QSslSocket *socket)
 {
     const auto session = sessions_.take(socket);
     socket_send_states_.remove(socket);
+    const auto should_retry_outbound = session.outbound && !session.target_peer_id.isEmpty();
     if (session.outbound && !session.target_peer_id.isEmpty()) {
         pending_connections_.remove(session.target_peer_id);
         if (session.authenticated) {
@@ -1892,6 +1911,9 @@ void peer_service::handle_disconnected(QSslSocket *socket)
         << "port=" << socket->peerPort();
     write_peer_status_snapshot();
     socket->deleteLater();
+    if (should_retry_outbound) {
+        attempt_connections();
+    }
 }
 
 void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerInfo &peer_info)
@@ -3194,6 +3216,26 @@ void peer_service::maybe_connect_to_peer(
                 << "port=" << socket->peerPort();
             socket->setPeerVerifyName(QString{});
             socket->startClientEncryption();
+        });
+        QPointer<QSslSocket> guarded_socket{socket};
+        QTimer::singleShot(outbound_connect_timeout_ms, this, [this, guarded_socket, peer_id]() {
+            if (!guarded_socket || !sessions_.contains(guarded_socket.get())) {
+                return;
+            }
+
+            const auto session = sessions_.value(guarded_socket.get());
+            if (!session.outbound
+                || session.authenticated
+                || session.target_peer_id != peer_id) {
+                return;
+            }
+
+            qCWarning(shared_peer_service_log)
+                << "Outbound peer connection timed out"
+                << "peer_id=" << peer_id
+                << "address=" << guarded_socket->peerAddress().toString()
+                << "port=" << guarded_socket->peerPort();
+            close_socket(guarded_socket.get(), QStringLiteral("Timed out waiting for peer authentication"));
         });
 
         qCDebug(shared_peer_service_log)

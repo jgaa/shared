@@ -6,6 +6,73 @@ Dialog {
     id: root
     required property var app_controller
 
+    function drawDirectedEdge(ctx, edge) {
+        if (!edge.show_arrow) {
+            ctx.save()
+            ctx.beginPath()
+            if (edge.dotted) {
+                ctx.setLineDash([6, 6])
+            } else {
+                ctx.setLineDash([])
+            }
+            ctx.strokeStyle = edge.color
+            ctx.lineWidth = edge.dotted ? 1.5 : 2.5
+            ctx.moveTo(edge.x1, edge.y1)
+            ctx.lineTo(edge.x2, edge.y2)
+            ctx.stroke()
+            ctx.restore()
+            return
+        }
+
+        const dx = edge.x2 - edge.x1
+        const dy = edge.y2 - edge.y1
+        const length = Math.sqrt(dx * dx + dy * dy)
+        if (length < 1) {
+            return
+        }
+
+        const ux = dx / length
+        const uy = dy / length
+        const targetGap = 28
+        const arrowLength = 12
+        const arrowWidth = 5
+        const endX = edge.x2 - ux * targetGap
+        const endY = edge.y2 - uy * targetGap
+        const arrowBaseX = endX - ux * arrowLength
+        const arrowBaseY = endY - uy * arrowLength
+        const perpX = -uy
+        const perpY = ux
+
+        ctx.save()
+        ctx.beginPath()
+        if (edge.dotted) {
+            ctx.setLineDash([6, 6])
+        } else {
+            ctx.setLineDash([])
+        }
+        ctx.strokeStyle = edge.color
+        ctx.lineWidth = edge.dotted ? 1.5 : 2.5
+        ctx.moveTo(edge.x1, edge.y1)
+        ctx.lineTo(endX, endY)
+        ctx.stroke()
+        ctx.restore()
+
+        ctx.save()
+        ctx.beginPath()
+        ctx.setLineDash([])
+        ctx.fillStyle = edge.color
+        ctx.moveTo(endX, endY)
+        ctx.lineTo(
+            arrowBaseX + perpX * arrowWidth,
+            arrowBaseY + perpY * arrowWidth)
+        ctx.lineTo(
+            arrowBaseX - perpX * arrowWidth,
+            arrowBaseY - perpY * arrowWidth)
+        ctx.closePath()
+        ctx.fill()
+        ctx.restore()
+    }
+
     modal: true
     focus: true
     title: "Stitched Topology"
@@ -59,20 +126,7 @@ Dialog {
 
                             const edges = app_controller.stitched_graph_edges
                             for (let i = 0; i < edges.length; ++i) {
-                                const edge = edges[i]
-                                ctx.save()
-                                ctx.beginPath()
-                                if (edge.dotted) {
-                                    ctx.setLineDash([6, 6])
-                                } else {
-                                    ctx.setLineDash([])
-                                }
-                                ctx.strokeStyle = edge.color
-                                ctx.lineWidth = edge.dotted ? 1.5 : 2.5
-                                ctx.moveTo(edge.x1, edge.y1)
-                                ctx.lineTo(edge.x2, edge.y2)
-                                ctx.stroke()
-                                ctx.restore()
+                                root.drawDirectedEdge(ctx, edges[i])
                             }
                         }
 

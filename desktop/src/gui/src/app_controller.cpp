@@ -227,7 +227,8 @@ QVariantMap make_ego_edge(
     qreal x2,
     qreal y2,
     bool dotted,
-    const QString &color)
+    const QString &color,
+    bool show_arrow = false)
 {
     QVariantMap edge{};
     edge.insert(QStringLiteral("from_peer_id"), from_peer_id);
@@ -238,6 +239,7 @@ QVariantMap make_ego_edge(
     edge.insert(QStringLiteral("y2"), y2);
     edge.insert(QStringLiteral("dotted"), dotted);
     edge.insert(QStringLiteral("color"), color);
+    edge.insert(QStringLiteral("show_arrow"), show_arrow);
     return edge;
 }
 
@@ -325,7 +327,8 @@ void append_ring_nodes(
             x,
             y,
             dotted,
-            edge_color));
+            edge_color,
+            false));
     }
 }
 
@@ -1863,7 +1866,8 @@ void app_controller::refresh_verified_peers()
                     x,
                     y,
                     false,
-                    QStringLiteral("#2e9d50")));
+                    QStringLiteral("#2e9d50"),
+                    true));
             } else if (relay_available) {
                 next_stitched_graph_edges.append(make_ego_edge(
                     configuration_.peer_id,
@@ -1873,12 +1877,13 @@ void app_controller::refresh_verified_peers()
                     x,
                     y,
                     true,
-                    QStringLiteral("#d6b11f")));
+                    QStringLiteral("#d6b11f"),
+                    false));
             }
         }
     }
 
-    QSet<QString> stitched_edge_keys{};
+    QHash<QString, QPair<QString, QString>> stitched_edges_by_pair{};
     for (const auto &value : snapshot.stitched_edges) {
         if (!value.isObject()) {
             continue;
@@ -1897,12 +1902,20 @@ void app_controller::refresh_verified_peers()
             continue;
         }
 
-        const auto edge_key = initiator_peer_id + QStringLiteral("|") + acceptor_peer_id;
-        if (stitched_edge_keys.contains(edge_key)) {
-            continue;
+        const auto pair_key = initiator_peer_id < acceptor_peer_id
+            ? initiator_peer_id + QStringLiteral("|") + acceptor_peer_id
+            : acceptor_peer_id + QStringLiteral("|") + initiator_peer_id;
+        const auto directed_key = initiator_peer_id + QStringLiteral("|") + acceptor_peer_id;
+        const auto existing = stitched_edges_by_pair.constFind(pair_key);
+        if (existing == stitched_edges_by_pair.cend()
+            || directed_key < (existing->first + QStringLiteral("|") + existing->second)) {
+            stitched_edges_by_pair.insert(pair_key, {initiator_peer_id, acceptor_peer_id});
         }
-        stitched_edge_keys.insert(edge_key);
+    }
 
+    for (auto it = stitched_edges_by_pair.cbegin(); it != stitched_edges_by_pair.cend(); ++it) {
+        const auto &initiator_peer_id = it->first;
+        const auto &acceptor_peer_id = it->second;
         const auto start = stitched_positions.value(initiator_peer_id);
         const auto end = stitched_positions.value(acceptor_peer_id);
         next_stitched_graph_edges.append(make_ego_edge(
@@ -1913,7 +1926,8 @@ void app_controller::refresh_verified_peers()
             end.x(),
             end.y(),
             true,
-            QStringLiteral("#5f7f96")));
+            QStringLiteral("#5f7f96"),
+            true));
     }
 
     const auto stitched_graph_changed = stitched_graph_nodes_ != next_stitched_graph_nodes

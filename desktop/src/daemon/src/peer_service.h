@@ -107,6 +107,7 @@ private:
         quint16 remote_listen_port{};
         bool outbound{};
         bool outbound_failure_recorded{};
+        bool closing{};
         bool authenticated{};
         bool peer_info_sent{};
         bool peer_info_received{};
