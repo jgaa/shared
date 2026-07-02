@@ -1808,6 +1808,7 @@ void app_controller::refresh_verified_peers()
         std::min(next_stitched_graph_width, next_stitched_graph_height) / 2.0 - 110.0);
 
     QHash<QString, QPointF> stitched_positions{};
+    QSet<QString> actively_reachable_peer_ids{};
     next_stitched_graph_nodes.append(make_ego_node(
         configuration_.peer_id,
         configured_name().isEmpty() ? QStringLiteral("This Node") : configured_name(),
@@ -1858,6 +1859,7 @@ void app_controller::refresh_verified_peers()
                 false));
 
             if (connected) {
+                actively_reachable_peer_ids.insert(peer_id);
                 next_stitched_graph_edges.append(make_ego_edge(
                     configuration_.peer_id,
                     peer_id,
@@ -1869,6 +1871,7 @@ void app_controller::refresh_verified_peers()
                     QStringLiteral("#2e9d50"),
                     true));
             } else if (relay_available) {
+                actively_reachable_peer_ids.insert(peer_id);
                 next_stitched_graph_edges.append(make_ego_edge(
                     configuration_.peer_id,
                     peer_id,
@@ -1897,6 +1900,8 @@ void app_controller::refresh_verified_peers()
             || initiator_peer_id == acceptor_peer_id
             || initiator_peer_id == configuration_.peer_id
             || acceptor_peer_id == configuration_.peer_id
+            || !actively_reachable_peer_ids.contains(initiator_peer_id)
+            || !actively_reachable_peer_ids.contains(acceptor_peer_id)
             || !stitched_positions.contains(initiator_peer_id)
             || !stitched_positions.contains(acceptor_peer_id)) {
             continue;
