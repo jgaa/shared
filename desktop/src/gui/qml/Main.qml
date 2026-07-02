@@ -148,6 +148,22 @@ ApplicationWindow {
         }
 
         Menu {
+            title: "View"
+
+            Action {
+                text: "Ego Graph"
+                enabled: app_controller.configured
+                onTriggered: ego_graph_dialog.open()
+            }
+
+            Action {
+                text: "Stitched Topology"
+                enabled: app_controller.configured
+                onTriggered: stitched_topology_dialog.open()
+            }
+        }
+
+        Menu {
             title: "Help"
 
             Action {
@@ -599,6 +615,18 @@ ApplicationWindow {
 
     PeersDialog {
         id: peers_dialog
+        parent: window.contentItem
+        app_controller: window.app_controller
+    }
+
+    EgoGraphDialog {
+        id: ego_graph_dialog
+        parent: window.contentItem
+        app_controller: window.app_controller
+    }
+
+    StitchedTopologyDialog {
+        id: stitched_topology_dialog
         parent: window.contentItem
         app_controller: window.app_controller
     }

@@ -12,10 +12,12 @@ qt_add_qml_module(sharedui
     VERSION 1.0
     QML_FILES
         qml/AboutDialog.qml
+        qml/EgoGraphDialog.qml
         qml/LogSettings.qml
         qml/LogViewerDialog.qml
         qml/Main.qml
         qml/PeersDialog.qml
+        qml/StitchedTopologyDialog.qml
         qml/SendClipboardDialog.qml
         qml/SendFilesDialog.qml
         qml/SettingsDialog.qml

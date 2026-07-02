@@ -93,6 +93,14 @@ class app_controller final : public QObject {
     Q_PROPERTY(int verified_peer_count READ verified_peer_count NOTIFY peers_changed)
     Q_PROPERTY(bool direct_peer_connected READ direct_peer_connected NOTIFY peers_changed)
     Q_PROPERTY(bool copy_targets_available READ copy_targets_available NOTIFY peers_changed)
+    Q_PROPERTY(QVariantList ego_graph_nodes READ ego_graph_nodes NOTIFY peers_changed)
+    Q_PROPERTY(QVariantList ego_graph_edges READ ego_graph_edges NOTIFY peers_changed)
+    Q_PROPERTY(int ego_graph_width READ ego_graph_width NOTIFY peers_changed)
+    Q_PROPERTY(int ego_graph_height READ ego_graph_height NOTIFY peers_changed)
+    Q_PROPERTY(QVariantList stitched_graph_nodes READ stitched_graph_nodes NOTIFY peers_changed)
+    Q_PROPERTY(QVariantList stitched_graph_edges READ stitched_graph_edges NOTIFY peers_changed)
+    Q_PROPERTY(int stitched_graph_width READ stitched_graph_width NOTIFY peers_changed)
+    Q_PROPERTY(int stitched_graph_height READ stitched_graph_height NOTIFY peers_changed)
     Q_PROPERTY(QString status_message READ status_message NOTIFY state_changed)
     Q_PROPERTY(QString status_color READ status_color NOTIFY state_changed)
     Q_PROPERTY(int status_level_value READ status_level_value NOTIFY state_changed)
@@ -157,6 +165,14 @@ public:
     [[nodiscard]] int verified_peer_count() const;
     [[nodiscard]] bool direct_peer_connected() const;
     [[nodiscard]] bool copy_targets_available() const;
+    [[nodiscard]] QVariantList ego_graph_nodes() const;
+    [[nodiscard]] QVariantList ego_graph_edges() const;
+    [[nodiscard]] int ego_graph_width() const;
+    [[nodiscard]] int ego_graph_height() const;
+    [[nodiscard]] QVariantList stitched_graph_nodes() const;
+    [[nodiscard]] QVariantList stitched_graph_edges() const;
+    [[nodiscard]] int stitched_graph_width() const;
+    [[nodiscard]] int stitched_graph_height() const;
     [[nodiscard]] QString status_message() const;
     [[nodiscard]] QString status_color() const;
     [[nodiscard]] int status_level_value() const;
@@ -304,6 +320,14 @@ private:
     core::agent_configuration configuration_{};
     QString trusted_agent_fingerprint_{};
     verified_peers_model verified_peers_{this};
+    QVariantList ego_graph_nodes_{};
+    QVariantList ego_graph_edges_{};
+    int ego_graph_width_{900};
+    int ego_graph_height_{700};
+    QVariantList stitched_graph_nodes_{};
+    QVariantList stitched_graph_edges_{};
+    int stitched_graph_width_{900};
+    int stitched_graph_height_{700};
     QString status_message_{};
     status_level status_level_{status_ok};
     int clipboard_limit_megabytes_{};

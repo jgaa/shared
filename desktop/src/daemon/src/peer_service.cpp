@@ -43,6 +43,7 @@ constexpr qsizetype transfer_queue_limit_bytes{3 * static_cast<qsizetype>(transf
 constexpr auto keepalive_interval_ms{15000};
 constexpr auto address_hint_republish_interval_ms{30000};
 constexpr auto reachability_ttl_ms{90000};
+constexpr auto topology_ttl_ms{90000};
 constexpr auto reachability_broadcast_min_delay_ms{500};
 constexpr auto reachability_broadcast_max_delay_ms{1500};
 constexpr qint64 outbound_retry_initial_delay_ms{5000};
@@ -58,6 +59,37 @@ QString build_numbered_filename(const QString &base_name, const QString &suffix,
 QString socket_address(const QSslSocket &socket)
 {
     return socket.peerAddress().toString();
+}
+
+QString normalized_topology_edge_key(QString initiator_peer_id, QString acceptor_peer_id)
+{
+    initiator_peer_id = initiator_peer_id.trimmed();
+    acceptor_peer_id = acceptor_peer_id.trimmed();
+    if (initiator_peer_id.isEmpty()
+        || acceptor_peer_id.isEmpty()
+        || initiator_peer_id == acceptor_peer_id) {
+        return {};
+    }
+
+    return initiator_peer_id + QStringLiteral("|") + acceptor_peer_id;
+}
+
+std::optional<QPair<QString, QString>> topology_edge_from_key(const QString &edge_key)
+{
+    const auto separator_index = edge_key.indexOf(QLatin1Char('|'));
+    if (separator_index <= 0 || separator_index >= edge_key.size() - 1) {
+        return std::nullopt;
+    }
+
+    const auto initiator_peer_id = edge_key.first(separator_index).trimmed();
+    const auto acceptor_peer_id = edge_key.sliced(separator_index + 1).trimmed();
+    if (initiator_peer_id.isEmpty()
+        || acceptor_peer_id.isEmpty()
+        || initiator_peer_id == acceptor_peer_id) {
+        return std::nullopt;
+    }
+
+    return QPair<QString, QString>{initiator_peer_id, acceptor_peer_id};
 }
 
 shared::v1::Envelope make_envelope(const QString &message_id)
@@ -242,6 +274,7 @@ void peer_service::stop()
     pending_connections_.clear();
     outbound_retry_states_.clear();
     reachability_claims_by_target_.clear();
+    topology_snapshots_by_peer_.clear();
     pending_who_has_queries_.clear();
     for (auto it = incoming_clipboard_transfers_.begin(); it != incoming_clipboard_transfers_.end(); ++it) {
         if (it.value().approval_timer != nullptr) {
@@ -988,6 +1021,7 @@ void peer_service::flush_reachability_broadcast()
         }
 
         send_current_reachability(it.key());
+        send_current_topology(it.key());
         sent_any = true;
     }
 
@@ -1375,6 +1409,42 @@ void peer_service::send_current_reachability(QSslSocket *socket)
     send_envelope(socket, envelope, QStringLiteral("reachability-advertisement"), outbound_priority::normal);
 }
 
+void peer_service::send_current_topology(QSslSocket *socket)
+{
+    shared::v1::PeerId advertiser_peer_id{};
+    advertiser_peer_id.setUuid(configuration_.peer_id);
+
+    QList<shared::v1::TopologyLink> direct_links{};
+    const auto edge_keys = current_topology_edge_keys();
+    direct_links.reserve(edge_keys.size());
+    for (const auto &edge_key : edge_keys) {
+        const auto edge = topology_edge_from_key(edge_key);
+        if (!edge.has_value()) {
+            continue;
+        }
+
+        shared::v1::PeerId initiator_peer_id{};
+        initiator_peer_id.setUuid(edge->first);
+        shared::v1::PeerId acceptor_peer_id{};
+        acceptor_peer_id.setUuid(edge->second);
+
+        shared::v1::TopologyLink link{};
+        link.setInitiatorPeerId(initiator_peer_id);
+        link.setAcceptorPeerId(acceptor_peer_id);
+        direct_links.append(link);
+    }
+
+    shared::v1::TopologyAdvertisement advertisement{};
+    advertisement.setAdvertiserPeerId(advertiser_peer_id);
+    advertisement.setDirectLinks(direct_links);
+    advertisement.setCreatedTimeMs(static_cast<quint64>(QDateTime::currentDateTimeUtc().toMSecsSinceEpoch()));
+    advertisement.setTtlMs(topology_ttl_ms);
+
+    auto envelope = make_envelope(next_message_id());
+    envelope.setTopologyAdvertisement(advertisement);
+    send_envelope(socket, envelope, QStringLiteral("topology-advertisement"), outbound_priority::normal);
+}
+
 void peer_service::broadcast_peer_list(QSslSocket *exclude_socket)
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
@@ -1455,6 +1525,10 @@ void peer_service::write_peer_status_snapshot()
     const auto claims_changed = purge_expired_reachability_claims();
     if (claims_changed) {
         qCInfo(shared_peer_service_log) << "Purged expired reachability claims";
+    }
+    const auto topology_changed = purge_expired_topology_snapshots();
+    if (topology_changed) {
+        qCInfo(shared_peer_service_log) << "Purged expired topology snapshots";
     }
 
     QString error_message{};
@@ -1542,13 +1616,31 @@ void peer_service::write_peer_status_snapshot()
         peers.append(object);
     }
 
+    QJsonArray stitched_edges{};
+    const auto topology_edge_keys = current_topology_edge_keys();
+    for (const auto &edge_key : topology_edge_keys) {
+        const auto edge = topology_edge_from_key(edge_key);
+        if (!edge.has_value()) {
+            continue;
+        }
+
+        QJsonObject object{};
+        object.insert(QStringLiteral("initiator_peer_id"), edge->first);
+        object.insert(QStringLiteral("acceptor_peer_id"), edge->second);
+        stitched_edges.append(object);
+    }
+
+    QJsonObject snapshot{};
+    snapshot.insert(QStringLiteral("peers"), peers);
+    snapshot.insert(QStringLiteral("stitched_edges"), stitched_edges);
+
     QSaveFile file{app_paths_.peer_status_path()};
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         qCCritical(shared_peer_service_log) << "Failed to open peer status file for write" << file.fileName() << file.errorString();
         return;
     }
 
-    const auto bytes = QJsonDocument{peers}.toJson(QJsonDocument::Compact);
+    const auto bytes = QJsonDocument{snapshot}.toJson(QJsonDocument::Compact);
     if (file.write(bytes) != bytes.size()) {
         qCCritical(shared_peer_service_log) << "Failed to write peer status file" << file.fileName() << file.errorString();
         return;
@@ -1632,6 +1724,13 @@ void peer_service::process_authenticated_envelope(
         qCInfo(shared_peer_service_log) << "received reachability-advertisement" << envelope.messageId();
         note_peer_activity(socket);
         handle_reachability_advertisement(socket, envelope.reachabilityAdvertisement());
+        return;
+    }
+
+    if (envelope.hasTopologyAdvertisement()) {
+        qCInfo(shared_peer_service_log) << "received topology-advertisement" << envelope.messageId();
+        note_peer_activity(socket);
+        handle_topology_advertisement(socket, envelope.topologyAdvertisement());
         return;
     }
 
@@ -1781,6 +1880,7 @@ void peer_service::handle_disconnected(QSslSocket *socket)
                 QStringLiteral("direct"),
                 socket);
             clear_reachability_claims_for_advertiser(session.remote_peer_id);
+            topology_snapshots_by_peer_.remove(session.remote_peer_id);
             schedule_reachability_broadcast();
         }
     }
@@ -1861,6 +1961,7 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
     send_local_peer_info(socket);
     send_known_address_hints(socket);
     send_current_reachability(socket);
+    send_current_topology(socket);
     schedule_reachability_broadcast();
 
     if (current_peer_list_version_ >= peer_info.peerListVersion()) {
@@ -1959,6 +2060,59 @@ void peer_service::handle_reachability_advertisement(
     }
 
     [[maybe_unused]] const auto claims_changed = purge_expired_reachability_claims();
+    write_peer_status_snapshot();
+}
+
+void peer_service::handle_topology_advertisement(
+    QSslSocket *socket,
+    const shared::v1::TopologyAdvertisement &advertisement)
+{
+    const auto session = sessions_.value(socket);
+    if (!session.authenticated || session.remote_peer_id.isEmpty()) {
+        qCWarning(shared_peer_service_log) << "Ignoring topology advertisement from unauthenticated peer";
+        return;
+    }
+
+    if (!advertisement.hasAdvertiserPeerId()
+        || advertisement.advertiserPeerId().uuid().trimmed().isEmpty()) {
+        qCWarning(shared_peer_service_log) << "Ignoring topology advertisement without advertiser id";
+        return;
+    }
+
+    const auto advertiser_peer_id = advertisement.advertiserPeerId().uuid().trimmed();
+    if (advertiser_peer_id != session.remote_peer_id) {
+        qCWarning(shared_peer_service_log)
+            << "Ignoring topology advertisement with mismatched advertiser id"
+            << "expected=" << session.remote_peer_id
+            << "actual=" << advertiser_peer_id;
+        return;
+    }
+
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    const auto ttl_ms = qBound<qint64>(
+        static_cast<qint64>(1000),
+        static_cast<qint64>(advertisement.ttlMs()),
+        static_cast<qint64>(topology_ttl_ms));
+
+    topology_snapshot snapshot{};
+    snapshot.expiry_time_ms = now_ms + ttl_ms;
+    for (const auto &link : advertisement.directLinks()) {
+        if (!link.hasInitiatorPeerId() || !link.hasAcceptorPeerId()) {
+            continue;
+        }
+
+        const auto initiator_peer_id = link.initiatorPeerId().uuid().trimmed();
+        const auto acceptor_peer_id = link.acceptorPeerId().uuid().trimmed();
+        const auto edge_key = normalized_topology_edge_key(initiator_peer_id, acceptor_peer_id);
+        if (edge_key.isEmpty()) {
+            continue;
+        }
+
+        snapshot.edge_keys.insert(edge_key);
+    }
+
+    topology_snapshots_by_peer_.insert(advertiser_peer_id, snapshot);
+    [[maybe_unused]] const auto snapshots_changed = purge_expired_topology_snapshots();
     write_peer_status_snapshot();
 }
 
@@ -3164,6 +3318,51 @@ QStringList peer_service::current_directly_connected_peer_ids() const
     return peer_ids;
 }
 
+QSet<QString> peer_service::current_topology_edge_keys() const
+{
+    QSet<QString> edge_keys{};
+
+    for (auto it = sessions_.cbegin(); it != sessions_.cend(); ++it) {
+        const auto &session = it.value();
+        if (!session.authenticated || session.remote_peer_id.isEmpty()) {
+            continue;
+        }
+
+        const auto edge_key = session.outbound
+            ? normalized_topology_edge_key(configuration_.peer_id, session.remote_peer_id)
+            : normalized_topology_edge_key(session.remote_peer_id, configuration_.peer_id);
+        if (!edge_key.isEmpty()) {
+            edge_keys.insert(edge_key);
+        }
+    }
+
+    for (auto target_it = reachability_claims_by_target_.cbegin();
+         target_it != reachability_claims_by_target_.cend();
+         ++target_it) {
+        const auto &target_peer_id = target_it.key();
+        for (auto advertiser_it = target_it->cbegin(); advertiser_it != target_it->cend(); ++advertiser_it) {
+            if (authenticated_socket_for_peer(advertiser_it.key()) == nullptr) {
+                continue;
+            }
+
+            const auto edge_key = normalized_topology_edge_key(advertiser_it.key(), target_peer_id);
+            if (!edge_key.isEmpty()) {
+                edge_keys.insert(edge_key);
+            }
+        }
+    }
+
+    for (auto it = topology_snapshots_by_peer_.cbegin(); it != topology_snapshots_by_peer_.cend(); ++it) {
+        if (authenticated_socket_for_peer(it.key()) == nullptr) {
+            continue;
+        }
+
+        edge_keys.unite(it->edge_keys);
+    }
+
+    return edge_keys;
+}
+
 void peer_service::schedule_reachability_broadcast()
 {
     if (reachability_broadcast_pending_) {
@@ -3242,6 +3441,7 @@ void peer_service::enforce_authorized_peer_sessions(const shared::v1::PeerList &
     for (const auto &removed_peer_id : removed_peer_ids) {
         clear_reachability_claims_for_advertiser(removed_peer_id);
         reachability_claims_by_target_.remove(removed_peer_id);
+        topology_snapshots_by_peer_.remove(removed_peer_id);
         pending_connections_.remove(removed_peer_id);
         outbound_retry_states_.remove(removed_peer_id);
     }
@@ -3276,6 +3476,24 @@ bool peer_service::purge_expired_reachability_claims()
         }
 
         ++target_it;
+    }
+
+    return changed;
+}
+
+bool peer_service::purge_expired_topology_snapshots()
+{
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    auto changed = false;
+
+    for (auto it = topology_snapshots_by_peer_.begin(); it != topology_snapshots_by_peer_.end();) {
+        if (it->expiry_time_ms > now_ms) {
+            ++it;
+            continue;
+        }
+
+        it = topology_snapshots_by_peer_.erase(it);
+        changed = true;
     }
 
     return changed;

@@ -20,13 +20,16 @@
 #include <QtNetwork/QHostAddress>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QSettings>
+#include <QtCore/QSet>
 #include <QtCore/QSysInfo>
 #include <QtCore/QUrl>
 #include <QtCore/QUuid>
 #include <QtCore/QVariantMap>
 #include <QtCore/QtNumeric>
+#include <QtCore/QPointF>
 #include <QtNetwork/QSslSocket>
 #include <algorithm>
+#include <cmath>
 #include <QtWidgets/QFileDialog>
 #include <stdexcept>
 
@@ -187,6 +190,143 @@ bool is_valid_listen_host(const QString &host)
 int bounded_port(int value)
 {
     return qBound(1, value, 65535);
+}
+
+QString format_socket_address(const QString &ip, int port)
+{
+    return ip.isEmpty() || port <= 0
+        ? QString{}
+        : QStringLiteral("%1:%2").arg(ip).arg(port);
+}
+
+QVariantMap make_ego_node(
+    const QString &peer_id,
+    const QString &name,
+    const QString &status_label,
+    const QString &status_color,
+    qreal x,
+    qreal y,
+    bool is_local)
+{
+    QVariantMap node{};
+    node.insert(QStringLiteral("peer_id"), peer_id);
+    node.insert(QStringLiteral("name"), name);
+    node.insert(QStringLiteral("status_label"), status_label);
+    node.insert(QStringLiteral("status_color"), status_color);
+    node.insert(QStringLiteral("x"), x);
+    node.insert(QStringLiteral("y"), y);
+    node.insert(QStringLiteral("is_local"), is_local);
+    return node;
+}
+
+QVariantMap make_ego_edge(
+    const QString &from_peer_id,
+    const QString &to_peer_id,
+    qreal x1,
+    qreal y1,
+    qreal x2,
+    qreal y2,
+    bool dotted,
+    const QString &color)
+{
+    QVariantMap edge{};
+    edge.insert(QStringLiteral("from_peer_id"), from_peer_id);
+    edge.insert(QStringLiteral("to_peer_id"), to_peer_id);
+    edge.insert(QStringLiteral("x1"), x1);
+    edge.insert(QStringLiteral("y1"), y1);
+    edge.insert(QStringLiteral("x2"), x2);
+    edge.insert(QStringLiteral("y2"), y2);
+    edge.insert(QStringLiteral("dotted"), dotted);
+    edge.insert(QStringLiteral("color"), color);
+    return edge;
+}
+
+struct runtime_snapshot {
+    QHash<QString, QJsonObject> runtime_status{};
+    QJsonArray stitched_edges{};
+};
+
+runtime_snapshot load_runtime_snapshot(const QString &status_file_path)
+{
+    runtime_snapshot snapshot{};
+
+    QFile status_file{status_file_path};
+    if (!status_file.exists() || !status_file.open(QIODevice::ReadOnly)) {
+        return snapshot;
+    }
+
+    const auto document = QJsonDocument::fromJson(status_file.readAll());
+    if (document.isArray()) {
+        for (const auto &value : document.array()) {
+            if (!value.isObject()) {
+                continue;
+            }
+            const auto object = value.toObject();
+            snapshot.runtime_status.insert(object.value(QStringLiteral("peer_id")).toString(), object);
+        }
+        return snapshot;
+    }
+
+    if (!document.isObject()) {
+        return snapshot;
+    }
+
+    const auto root = document.object();
+    for (const auto &value : root.value(QStringLiteral("peers")).toArray()) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const auto object = value.toObject();
+        snapshot.runtime_status.insert(object.value(QStringLiteral("peer_id")).toString(), object);
+    }
+    snapshot.stitched_edges = root.value(QStringLiteral("stitched_edges")).toArray();
+    return snapshot;
+}
+
+constexpr double pi{3.14159265358979323846};
+
+void append_ring_nodes(
+    QVariantList &nodes,
+    QVariantList &edges,
+    const QList<QVariantMap> &peers,
+    const QString &local_peer_id,
+    const QPointF &center,
+    qreal radius,
+    const QString &edge_color,
+    bool dotted,
+    bool connect_to_center = true)
+{
+    if (peers.isEmpty()) {
+        return;
+    }
+
+    const auto step = (2.0 * pi) / static_cast<double>(peers.size());
+    for (qsizetype index = 0; index < peers.size(); ++index) {
+        const auto angle = (-pi / 2.0) + (step * static_cast<double>(index));
+        const auto x = center.x() + (radius * std::cos(angle));
+        const auto y = center.y() + (radius * std::sin(angle));
+        const auto peer = peers.at(index);
+        nodes.append(make_ego_node(
+            peer.value(QStringLiteral("peer_id")).toString(),
+            peer.value(QStringLiteral("name")).toString(),
+            peer.value(QStringLiteral("status_label")).toString(),
+            peer.value(QStringLiteral("status_color")).toString(),
+            x,
+            y,
+            false));
+        if (!connect_to_center) {
+            continue;
+        }
+        edges.append(make_ego_edge(
+            local_peer_id,
+            peer.value(QStringLiteral("peer_id")).toString(),
+            center.x(),
+            center.y(),
+            x,
+            y,
+            dotted,
+            edge_color));
+    }
 }
 
 QStringList normalized_local_file_paths(const QStringList &paths)
@@ -433,6 +573,46 @@ bool app_controller::copy_targets_available() const
     return std::any_of(verified_peers_.rows().cbegin(), verified_peers_.rows().cend(), [](const auto &peer) {
         return peer.status_label != QStringLiteral("Unavailable");
     });
+}
+
+QVariantList app_controller::ego_graph_nodes() const
+{
+    return ego_graph_nodes_;
+}
+
+QVariantList app_controller::ego_graph_edges() const
+{
+    return ego_graph_edges_;
+}
+
+int app_controller::ego_graph_width() const
+{
+    return ego_graph_width_;
+}
+
+int app_controller::ego_graph_height() const
+{
+    return ego_graph_height_;
+}
+
+QVariantList app_controller::stitched_graph_nodes() const
+{
+    return stitched_graph_nodes_;
+}
+
+QVariantList app_controller::stitched_graph_edges() const
+{
+    return stitched_graph_edges_;
+}
+
+int app_controller::stitched_graph_width() const
+{
+    return stitched_graph_width_;
+}
+
+int app_controller::stitched_graph_height() const
+{
+    return stitched_graph_height_;
 }
 
 QString app_controller::status_message() const
@@ -1490,20 +1670,8 @@ void app_controller::refresh_verified_peers()
         return;
     }
 
-    QHash<QString, QJsonObject> runtime_status{};
-    QFile status_file{app_paths_.peer_status_path()};
-    if (status_file.exists() && status_file.open(QIODevice::ReadOnly)) {
-        const auto document = QJsonDocument::fromJson(status_file.readAll());
-        if (document.isArray()) {
-            for (const auto &value : document.array()) {
-                if (!value.isObject()) {
-                    continue;
-                }
-                const auto object = value.toObject();
-                runtime_status.insert(object.value(QStringLiteral("peer_id")).toString(), object);
-            }
-        }
-    }
+    const auto snapshot = load_runtime_snapshot(app_paths_.peer_status_path());
+    const auto runtime_status = snapshot.runtime_status;
 
     QList<shared::v1::PeerListEntry> entries{};
     for (const auto &entry : peer_list.peers()) {
@@ -1516,6 +1684,10 @@ void app_controller::refresh_verified_peers()
     std::sort(entries.begin(), entries.end(), [](const auto &left, const auto &right) {
         return QString::localeAwareCompare(left.identity().name(), right.identity().name()) < 0;
     });
+
+    QList<QVariantMap> direct_peers{};
+    QList<QVariantMap> relay_peers{};
+    QList<QVariantMap> offline_peers{};
 
     for (const auto &entry : entries) {
         const auto peer_id = entry.identity().peerId().uuid();
@@ -1533,32 +1705,225 @@ void app_controller::refresh_verified_peers()
             status_label = QStringLiteral("Probably Available");
             status_color = QStringLiteral("#d6b11f");
         } else if (address_available) {
-            status_label = QStringLiteral("Available");
+            status_label = QStringLiteral("Known Address");
             status_color = QStringLiteral("#cf6d1d");
         } else {
             status_label = QStringLiteral("Unavailable");
             status_color = QStringLiteral("#b23a2e");
         }
 
-        const auto address = status.value(QStringLiteral("address")).toString();
-        const auto port = status.value(QStringLiteral("port")).toInt();
         const auto last_known_ip = status.value(QStringLiteral("last_known_ip")).toString();
         const auto last_known_port = status.value(QStringLiteral("last_known_port")).toInt();
+        const auto address = status.value(QStringLiteral("address")).toString();
+        const auto port = status.value(QStringLiteral("port")).toInt();
         next_peers.append({
             .peer_id = peer_id,
             .name = entry.identity().name(),
             .status_label = status_label,
             .status_color = status_color,
-            .address = address.isEmpty() || port <= 0
-                ? QString{}
-                : QStringLiteral("%1:%2").arg(address).arg(port),
-            .last_known_address = last_known_ip.isEmpty() || last_known_port <= 0
-                ? last_known_ip
-                : QStringLiteral("%1:%2").arg(last_known_ip).arg(last_known_port),
+            .address = format_socket_address(address, port),
+            .last_known_address = format_socket_address(last_known_ip, last_known_port),
             .last_communicated = format_elapsed(
                 status.value(QStringLiteral("last_communication_time_ms")).toString().toLongLong()),
         });
+
+        const QVariantMap graph_peer{
+            {QStringLiteral("peer_id"), peer_id},
+            {QStringLiteral("name"), entry.identity().name()},
+            {QStringLiteral("status_label"), status_label},
+            {QStringLiteral("status_color"), status_color},
+        };
+        if (connected) {
+            direct_peers.append(graph_peer);
+        } else if (relay_available) {
+            relay_peers.append(graph_peer);
+        } else {
+            offline_peers.append(graph_peer);
+        }
     }
+
+    QVariantList next_ego_graph_nodes{};
+    QVariantList next_ego_graph_edges{};
+    const auto max_ring_size = std::max({direct_peers.size(), relay_peers.size(), offline_peers.size(), qsizetype{1}});
+    const auto next_ego_graph_width = std::max(720, 320 + (static_cast<int>(max_ring_size) * 110));
+    const auto next_ego_graph_height = std::max(560, 300 + (static_cast<int>(max_ring_size) * 92));
+    const QPointF center{next_ego_graph_width / 2.0, next_ego_graph_height / 2.0};
+
+    next_ego_graph_nodes.append(make_ego_node(
+        configuration_.peer_id,
+        configured_name().isEmpty() ? QStringLiteral("This Node") : configured_name(),
+        QStringLiteral("Local"),
+        QStringLiteral("#245c73"),
+        center.x(),
+        center.y(),
+        true));
+    append_ring_nodes(
+        next_ego_graph_nodes,
+        next_ego_graph_edges,
+        direct_peers,
+        configuration_.peer_id,
+        center,
+        120.0,
+        QStringLiteral("#2e9d50"),
+        false);
+    append_ring_nodes(
+        next_ego_graph_nodes,
+        next_ego_graph_edges,
+        relay_peers,
+        configuration_.peer_id,
+        center,
+        210.0,
+        QStringLiteral("#d6b11f"),
+        true);
+    append_ring_nodes(
+        next_ego_graph_nodes,
+        next_ego_graph_edges,
+        offline_peers,
+        configuration_.peer_id,
+        center,
+        300.0,
+        QStringLiteral("#c7b8a1"),
+        true,
+        false);
+    const auto graph_changed = ego_graph_nodes_ != next_ego_graph_nodes
+        || ego_graph_edges_ != next_ego_graph_edges
+        || ego_graph_width_ != next_ego_graph_width
+        || ego_graph_height_ != next_ego_graph_height;
+    ego_graph_nodes_ = std::move(next_ego_graph_nodes);
+    ego_graph_edges_ = std::move(next_ego_graph_edges);
+    ego_graph_width_ = next_ego_graph_width;
+    ego_graph_height_ = next_ego_graph_height;
+
+    QVariantList next_stitched_graph_nodes{};
+    QVariantList next_stitched_graph_edges{};
+    const auto stitched_peer_count = std::max(entries.size(), qsizetype{1});
+    const auto next_stitched_graph_width = std::max(760, 320 + (static_cast<int>(stitched_peer_count) * 90));
+    const auto next_stitched_graph_height = std::max(620, 320 + (static_cast<int>(stitched_peer_count) * 75));
+    const QPointF stitched_center{next_stitched_graph_width / 2.0, next_stitched_graph_height / 2.0};
+    const qreal stitched_radius = std::max<qreal>(
+        170.0,
+        std::min(next_stitched_graph_width, next_stitched_graph_height) / 2.0 - 110.0);
+
+    QHash<QString, QPointF> stitched_positions{};
+    next_stitched_graph_nodes.append(make_ego_node(
+        configuration_.peer_id,
+        configured_name().isEmpty() ? QStringLiteral("This Node") : configured_name(),
+        QStringLiteral("Local"),
+        QStringLiteral("#245c73"),
+        stitched_center.x(),
+        stitched_center.y(),
+        true));
+    stitched_positions.insert(configuration_.peer_id, stitched_center);
+
+    if (!entries.isEmpty()) {
+        const auto stitched_step = (2.0 * pi) / static_cast<double>(entries.size());
+        for (qsizetype index = 0; index < entries.size(); ++index) {
+            const auto &entry = entries.at(index);
+            const auto peer_id = entry.identity().peerId().uuid();
+            const auto status = runtime_status.value(peer_id);
+            const auto connected = status.value(QStringLiteral("connected")).toBool();
+            const auto relay_available = status.value(QStringLiteral("relay_available")).toBool();
+            const auto address_available = status.value(QStringLiteral("address_available")).toBool();
+
+            QString status_label{};
+            QString status_color{};
+            if (connected) {
+                status_label = QStringLiteral("Connected");
+                status_color = QStringLiteral("#2e9d50");
+            } else if (relay_available) {
+                status_label = QStringLiteral("Probably Available");
+                status_color = QStringLiteral("#d6b11f");
+            } else if (address_available) {
+                status_label = QStringLiteral("Known Address");
+                status_color = QStringLiteral("#cf6d1d");
+            } else {
+                status_label = QStringLiteral("Unavailable");
+                status_color = QStringLiteral("#b23a2e");
+            }
+
+            const auto angle = (-pi / 2.0) + (stitched_step * static_cast<double>(index));
+            const auto x = stitched_center.x() + (stitched_radius * std::cos(angle));
+            const auto y = stitched_center.y() + (stitched_radius * std::sin(angle));
+            stitched_positions.insert(peer_id, QPointF{x, y});
+            next_stitched_graph_nodes.append(make_ego_node(
+                peer_id,
+                entry.identity().name(),
+                status_label,
+                status_color,
+                x,
+                y,
+                false));
+
+            if (connected) {
+                next_stitched_graph_edges.append(make_ego_edge(
+                    configuration_.peer_id,
+                    peer_id,
+                    stitched_center.x(),
+                    stitched_center.y(),
+                    x,
+                    y,
+                    false,
+                    QStringLiteral("#2e9d50")));
+            } else if (relay_available) {
+                next_stitched_graph_edges.append(make_ego_edge(
+                    configuration_.peer_id,
+                    peer_id,
+                    stitched_center.x(),
+                    stitched_center.y(),
+                    x,
+                    y,
+                    true,
+                    QStringLiteral("#d6b11f")));
+            }
+        }
+    }
+
+    QSet<QString> stitched_edge_keys{};
+    for (const auto &value : snapshot.stitched_edges) {
+        if (!value.isObject()) {
+            continue;
+        }
+
+        const auto object = value.toObject();
+        const auto initiator_peer_id = object.value(QStringLiteral("initiator_peer_id")).toString();
+        const auto acceptor_peer_id = object.value(QStringLiteral("acceptor_peer_id")).toString();
+        if (initiator_peer_id.isEmpty()
+            || acceptor_peer_id.isEmpty()
+            || initiator_peer_id == acceptor_peer_id
+            || initiator_peer_id == configuration_.peer_id
+            || acceptor_peer_id == configuration_.peer_id
+            || !stitched_positions.contains(initiator_peer_id)
+            || !stitched_positions.contains(acceptor_peer_id)) {
+            continue;
+        }
+
+        const auto edge_key = initiator_peer_id + QStringLiteral("|") + acceptor_peer_id;
+        if (stitched_edge_keys.contains(edge_key)) {
+            continue;
+        }
+        stitched_edge_keys.insert(edge_key);
+
+        const auto start = stitched_positions.value(initiator_peer_id);
+        const auto end = stitched_positions.value(acceptor_peer_id);
+        next_stitched_graph_edges.append(make_ego_edge(
+            initiator_peer_id,
+            acceptor_peer_id,
+            start.x(),
+            start.y(),
+            end.x(),
+            end.y(),
+            true,
+            QStringLiteral("#5f7f96")));
+    }
+
+    const auto stitched_graph_changed = stitched_graph_nodes_ != next_stitched_graph_nodes
+        || stitched_graph_edges_ != next_stitched_graph_edges
+        || stitched_graph_width_ != next_stitched_graph_width
+        || stitched_graph_height_ != next_stitched_graph_height;
+    stitched_graph_nodes_ = std::move(next_stitched_graph_nodes);
+    stitched_graph_edges_ = std::move(next_stitched_graph_edges);
+    stitched_graph_width_ = next_stitched_graph_width;
+    stitched_graph_height_ = next_stitched_graph_height;
 
     if (next_peers.size() == verified_peers_.rowCount()) {
         auto identical = true;
@@ -1568,7 +1933,7 @@ void app_controller::refresh_verified_peers()
                 break;
             }
         }
-        if (identical) {
+        if (identical && !graph_changed && !stitched_graph_changed) {
             return;
         }
     }

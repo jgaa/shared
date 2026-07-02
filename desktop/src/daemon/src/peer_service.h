@@ -122,6 +122,11 @@ private:
         qint64 expiry_time_ms{};
     };
 
+    struct topology_snapshot {
+        qint64 expiry_time_ms{};
+        QSet<QString> edge_keys{};
+    };
+
     struct who_has_reply_state {
         bool reachable{};
         QString relay_peer_id{};
@@ -230,6 +235,7 @@ private:
     void refresh_local_address_hints();
     void send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms = 0);
     void send_current_reachability(QSslSocket *socket);
+    void send_current_topology(QSslSocket *socket);
     void broadcast_peer_list(QSslSocket *exclude_socket = nullptr);
     void broadcast_address_hint(const shared::v1::AddressHint &hint, QSslSocket *exclude_socket = nullptr);
     void send_envelope(
@@ -253,6 +259,9 @@ private:
     void handle_reachability_advertisement(
         QSslSocket *socket,
         const shared::v1::ReachabilityAdvertisement &advertisement);
+    void handle_topology_advertisement(
+        QSslSocket *socket,
+        const shared::v1::TopologyAdvertisement &advertisement);
     void handle_who_has(
         QSslSocket *socket,
         quint32 request_id,
@@ -326,10 +335,12 @@ private:
         const QList<shared::v1::PeerAddress> &addresses,
         QSslSocket *exclude_socket = nullptr);
     [[nodiscard]] QStringList current_directly_connected_peer_ids() const;
+    [[nodiscard]] QSet<QString> current_topology_edge_keys() const;
     void schedule_reachability_broadcast();
     void clear_reachability_claims_for_advertiser(const QString &advertiser_peer_id);
     void enforce_authorized_peer_sessions(const shared::v1::PeerList &peer_list, const QString &reason);
     [[nodiscard]] bool purge_expired_reachability_claims();
+    [[nodiscard]] bool purge_expired_topology_snapshots();
     [[nodiscard]] bool peer_has_active_reachability_advertiser(const QString &peer_id) const;
     [[nodiscard]] QStringList direct_relay_candidates_for_peer(const QString &peer_id) const;
     [[nodiscard]] QCoro::Task<std::optional<QString>> resolve_relay_peer(
@@ -413,6 +424,7 @@ private:
     QHash<QSslSocket *, socket_send_state> socket_send_states_{};
     QHash<QString, peer_runtime_state> peer_runtime_states_{};
     QHash<QString, QHash<QString, reachability_claim>> reachability_claims_by_target_{};
+    QHash<QString, topology_snapshot> topology_snapshots_by_peer_{};
     QHash<quint32, pending_who_has_query> pending_who_has_queries_{};
     QHash<QString, outgoing_clipboard_transfer> outgoing_clipboard_transfers_{};
     QHash<QString, outgoing_file_transfer> outgoing_file_transfers_{};

@@ -103,6 +103,7 @@ message Envelope {
     PeerList peer_list = 11;
     AddressHint address_hint = 12;
     ReachabilityAdvertisement reachability_advertisement = 13;
+    TopologyAdvertisement topology_advertisement = 14;
 
     WhoHas who_has = 20;
     WhoHasReply who_has_reply = 21;
@@ -189,6 +190,18 @@ message AddressHint {
 message ReachabilityAdvertisement {
   PeerId advertiser_peer_id = 1;
   repeated PeerId directly_reachable_peer_ids = 2;
+  uint64 created_time_ms = 3;
+  uint32 ttl_ms = 4;
+}
+
+message TopologyLink {
+  PeerId initiator_peer_id = 1;
+  PeerId acceptor_peer_id = 2;
+}
+
+message TopologyAdvertisement {
+  PeerId advertiser_peer_id = 1;
+  repeated TopologyLink direct_links = 2;
   uint64 created_time_ms = 3;
   uint32 ttl_ms = 4;
 }

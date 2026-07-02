@@ -159,6 +159,7 @@ After authentication succeeds, the current desktop peer:
 * sends its own `PeerInfo` if it has not already
 * sends all known `AddressHint` entries
 * sends a `ReachabilityAdvertisement`
+* sends a `TopologyAdvertisement`
 * sends the current `PeerList` if the remote peer list version is older or equal
 
 ## Discovery and Address Hints
@@ -197,6 +198,22 @@ Current desktop values:
 
 * TTL sent: 90000 ms
 * rebroadcast of known reachability: on connect/disconnect and periodically with address republishing
+
+Peers also publish `TopologyAdvertisement` snapshots describing the current direct-connection graph they know about.
+
+`TopologyAdvertisement.direct_links` is directional:
+
+* `initiator_peer_id` is the peer that initiated the surviving authenticated connection
+* `acceptor_peer_id` is the peer that accepted that surviving authenticated connection
+
+Current desktop behavior:
+
+* TTL sent: 90000 ms
+* sent immediately after authentication succeeds
+* rebroadcast on connect/disconnect and periodically with address republishing
+* includes the local peer's direct authenticated sessions
+* includes directed peer-to-peer links learned from connected peers' topology advertisements
+* may include directed fallback links synthesized from active `ReachabilityAdvertisement` state when no richer topology advertisement is available yet
 
 Relay selection is single-hop only.
 

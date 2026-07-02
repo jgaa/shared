@@ -37,6 +37,18 @@ Routing behavior is the same as desktop:
 * single-hop relay only
 * never relay already-relayed traffic
 * answer `WhoHas` positively only when the destination is directly connected
+* publish `TopologyAdvertisement` snapshots with directed links for the direct connections the Android node currently knows about
+
+`TopologyAdvertisement.direct_links` direction requirement:
+
+* `initiator_peer_id`: the peer that initiated the surviving authenticated connection
+* `acceptor_peer_id`: the peer that accepted it
+
+Android should:
+
+* send `TopologyAdvertisement` immediately after peer authentication
+* refresh it whenever direct peer connectivity changes
+* retain and forward known directed links learned from connected peers while their TTL remains valid
 
 Android may act as a relay.
 
