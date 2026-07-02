@@ -7,6 +7,7 @@ Dialog {
     required property var app_controller
 
     property int currentPane: 0
+    property bool showEnrollmentSettings: !app_controller.configured || app_controller.trusted_agent
 
     function reload() {
         if (app_controller.trusted_agent && currentPane === 1) {
@@ -89,17 +90,25 @@ Dialog {
                             columnSpacing: 16
                             rowSpacing: 10
 
-                            Label { text: "Enrollment Listen IP" }
+                            Label {
+                                visible: root.showEnrollmentSettings
+                                text: "Enrollment Listen IP"
+                            }
                             TextField {
                                 id: local_enrollment_host
+                                visible: root.showEnrollmentSettings
                                 Layout.fillWidth: true
                                 placeholderText: "0.0.0.0"
                                 onEditingFinished: app_controller.local_enrollment_host = text
                             }
 
-                            Label { text: "Enrollment TCP Port" }
+                            Label {
+                                visible: root.showEnrollmentSettings
+                                text: "Enrollment TCP Port"
+                            }
                             SpinBox {
                                 id: local_enrollment_port
+                                visible: root.showEnrollmentSettings
                                 from: 1
                                 to: 65535
                                 editable: true

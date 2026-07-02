@@ -145,13 +145,16 @@ int address_source_priority(const QString &source)
     if (source == QStringLiteral("manual")) {
         return 0;
     }
-    if (source == QStringLiteral("direct")) {
+    if (source == QStringLiteral("local")) {
         return 1;
     }
-    if (source == QStringLiteral("local")) {
+    if (source == QStringLiteral("direct")) {
         return 2;
     }
-    return 3;
+    if (source == QStringLiteral("observed")) {
+        return 3;
+    }
+    return 4;
 }
 
 QList<shared::v1::PeerAddress> prioritized_addresses(QList<shared::v1::PeerAddress> addresses)
@@ -1348,7 +1351,7 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
         for (auto &existing : peer_addresses) {
             if (existing.ip() != ip
                 || existing.port() != port
-                || existing.source() != QStringLiteral("direct")) {
+                || existing.source() != QStringLiteral("observed")) {
                 continue;
             }
 
@@ -1363,7 +1366,7 @@ QHash<QString, QList<shared::v1::PeerAddress>> peer_service::known_addresses_wit
         shared::v1::PeerAddress address{};
         address.setIp(ip);
         address.setPort(port);
-        address.setSource(QStringLiteral("direct"));
+        address.setSource(QStringLiteral("observed"));
         // Keep synthesized live-session hints stable across republishes to avoid gossip churn.
         address.setObservedTimeMs(0);
         peer_addresses.append(address);
@@ -1527,7 +1530,7 @@ void peer_service::note_peer_activity(QSslSocket *socket, bool publish_observed_
             session.remote_peer_id,
             runtime_state.last_ip,
             runtime_state.last_port,
-            QStringLiteral("direct"),
+            QStringLiteral("observed"),
             socket);
     }
     write_peer_status_snapshot();
@@ -1561,6 +1564,7 @@ void peer_service::write_peer_status_snapshot()
         }
 
         auto connected = false;
+        auto local_connection_outbound = false;
         QString address{};
         quint16 port{};
         for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
@@ -1569,6 +1573,7 @@ void peer_service::write_peer_status_snapshot()
             }
 
             connected = true;
+            local_connection_outbound = it.value().outbound;
             address = it.key()->peerAddress().toString();
             port = it.value().remote_listen_port == 0
                 ? static_cast<quint16>(it.key()->peerPort())
@@ -1619,6 +1624,7 @@ void peer_service::write_peer_status_snapshot()
         object.insert(QStringLiteral("peer_id"), peer_id);
         object.insert(QStringLiteral("name"), entry.identity().name());
         object.insert(QStringLiteral("connected"), connected);
+        object.insert(QStringLiteral("local_connection_outbound"), local_connection_outbound);
         object.insert(QStringLiteral("relay_available"), relay_available);
         object.insert(QStringLiteral("address_available"), has_direct_address || has_runtime_address || connected);
         object.insert(QStringLiteral("address"), address);
@@ -1896,7 +1902,7 @@ void peer_service::handle_disconnected(QSslSocket *socket)
                 session.remote_peer_id,
                 runtime_state.last_ip,
                 runtime_state.last_port,
-                QStringLiteral("direct"),
+                QStringLiteral("observed"),
                 socket);
             clear_reachability_claims_for_advertiser(session.remote_peer_id);
             topology_snapshots_by_peer_.remove(session.remote_peer_id);
@@ -1969,7 +1975,7 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
         remote_peer_id,
         socket_address(*socket),
         static_cast<quint16>(peer_info.listenPort()),
-        QStringLiteral("direct"),
+        QStringLiteral("observed"),
         socket);
     merge_claimed_addresses(remote_peer_id, peer_info.knownAddresses(), socket);
 
@@ -3185,6 +3191,18 @@ void peer_service::maybe_connect_to_peer(
             continue;
         }
 
+        if (address.source() == QStringLiteral("observed")) {
+            qCDebug(shared_peer_service_log)
+                << "Skipping peer address candidate"
+                << "peer_id=" << peer_id
+                << "name=" << peer.identity().name()
+                << "ip=" << address.ip()
+                << "port=" << address.port()
+                << "source=" << address.source()
+                << "reason=" << "observed-address-not-dialable";
+            continue;
+        }
+
         if (is_self_advertised_address(local_addresses, address)) {
             qCDebug(shared_peer_service_log)
                 << "Skipping peer address candidate"
@@ -3375,22 +3393,6 @@ QSet<QString> peer_service::current_topology_edge_keys() const
             : normalized_topology_edge_key(session.remote_peer_id, configuration_.peer_id);
         if (!edge_key.isEmpty()) {
             edge_keys.insert(edge_key);
-        }
-    }
-
-    for (auto target_it = reachability_claims_by_target_.cbegin();
-         target_it != reachability_claims_by_target_.cend();
-         ++target_it) {
-        const auto &target_peer_id = target_it.key();
-        for (auto advertiser_it = target_it->cbegin(); advertiser_it != target_it->cend(); ++advertiser_it) {
-            if (authenticated_socket_for_peer(advertiser_it.key()) == nullptr) {
-                continue;
-            }
-
-            const auto edge_key = normalized_topology_edge_key(advertiser_it.key(), target_peer_id);
-            if (!edge_key.isEmpty()) {
-                edge_keys.insert(edge_key);
-            }
         }
     }
 

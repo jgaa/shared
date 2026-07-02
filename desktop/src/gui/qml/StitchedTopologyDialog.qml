@@ -33,9 +33,9 @@ Dialog {
 
         const ux = dx / length
         const uy = dy / length
-        const targetGap = 28
-        const arrowLength = 12
-        const arrowWidth = 5
+        const targetGap = 48
+        const arrowLength = 10
+        const arrowWidth = 4.5
         const endX = edge.x2 - ux * targetGap
         const endY = edge.y2 - uy * targetGap
         const arrowBaseX = endX - ux * arrowLength

@@ -963,7 +963,12 @@ void app_controller::reload_state()
 {
     try {
         configuration_ = configuration_repository_.load();
-        trusted_agent_fingerprint_ = security_materials_.current_server_enrollment_fingerprint();
+        if (configuration_.role == core::agent_role::local_trusted_agent) {
+            trusted_agent_fingerprint_ = security_materials_.current_server_enrollment_fingerprint();
+        } else {
+            trusted_agent_fingerprint_ = core::security_materials::format_enrollment_fingerprint(
+                configuration_.trusted_agent.pinned_server_fingerprint);
+        }
         refresh_verified_peers();
     } catch (const std::exception &exception) {
         qCCritical(shared_gui_app_controller_log) << "Failed to reload GUI state" << exception.what();
@@ -1808,6 +1813,7 @@ void app_controller::refresh_verified_peers()
         std::min(next_stitched_graph_width, next_stitched_graph_height) / 2.0 - 110.0);
 
     QHash<QString, QPointF> stitched_positions{};
+    QSet<QString> connected_peer_ids{};
     QSet<QString> actively_reachable_peer_ids{};
     next_stitched_graph_nodes.append(make_ego_node(
         configuration_.peer_id,
@@ -1859,17 +1865,33 @@ void app_controller::refresh_verified_peers()
                 false));
 
             if (connected) {
+                connected_peer_ids.insert(peer_id);
                 actively_reachable_peer_ids.insert(peer_id);
-                next_stitched_graph_edges.append(make_ego_edge(
-                    configuration_.peer_id,
-                    peer_id,
-                    stitched_center.x(),
-                    stitched_center.y(),
-                    x,
-                    y,
-                    false,
-                    QStringLiteral("#2e9d50"),
-                    true));
+                const auto local_connection_outbound =
+                    status.value(QStringLiteral("local_connection_outbound")).toBool();
+                if (local_connection_outbound) {
+                    next_stitched_graph_edges.append(make_ego_edge(
+                        configuration_.peer_id,
+                        peer_id,
+                        stitched_center.x(),
+                        stitched_center.y(),
+                        x,
+                        y,
+                        false,
+                        QStringLiteral("#2e9d50"),
+                        true));
+                } else {
+                    next_stitched_graph_edges.append(make_ego_edge(
+                        peer_id,
+                        configuration_.peer_id,
+                        x,
+                        y,
+                        stitched_center.x(),
+                        stitched_center.y(),
+                        false,
+                        QStringLiteral("#2e9d50"),
+                        true));
+                }
             } else if (relay_available) {
                 actively_reachable_peer_ids.insert(peer_id);
                 next_stitched_graph_edges.append(make_ego_edge(
@@ -1886,7 +1908,7 @@ void app_controller::refresh_verified_peers()
         }
     }
 
-    QHash<QString, QPair<QString, QString>> stitched_edges_by_pair{};
+    QHash<QString, QVariantMap> stitched_edges_by_pair{};
     for (const auto &value : snapshot.stitched_edges) {
         if (!value.isObject()) {
             continue;
@@ -1898,12 +1920,18 @@ void app_controller::refresh_verified_peers()
         if (initiator_peer_id.isEmpty()
             || acceptor_peer_id.isEmpty()
             || initiator_peer_id == acceptor_peer_id
-            || initiator_peer_id == configuration_.peer_id
-            || acceptor_peer_id == configuration_.peer_id
-            || !actively_reachable_peer_ids.contains(initiator_peer_id)
-            || !actively_reachable_peer_ids.contains(acceptor_peer_id)
             || !stitched_positions.contains(initiator_peer_id)
             || !stitched_positions.contains(acceptor_peer_id)) {
+            continue;
+        }
+
+        if (initiator_peer_id == configuration_.peer_id
+            || acceptor_peer_id == configuration_.peer_id) {
+            continue;
+        }
+
+        if (!actively_reachable_peer_ids.contains(initiator_peer_id)
+            || !actively_reachable_peer_ids.contains(acceptor_peer_id)) {
             continue;
         }
 
@@ -1912,15 +1940,22 @@ void app_controller::refresh_verified_peers()
             : acceptor_peer_id + QStringLiteral("|") + initiator_peer_id;
         const auto directed_key = initiator_peer_id + QStringLiteral("|") + acceptor_peer_id;
         const auto existing = stitched_edges_by_pair.constFind(pair_key);
+        QVariantMap edge{
+            {QStringLiteral("initiator_peer_id"), initiator_peer_id},
+            {QStringLiteral("acceptor_peer_id"), acceptor_peer_id},
+            {QStringLiteral("dotted"), true},
+            {QStringLiteral("color"), QStringLiteral("#5f7f96")},
+            {QStringLiteral("sort_key"), directed_key},
+        };
         if (existing == stitched_edges_by_pair.cend()
-            || directed_key < (existing->first + QStringLiteral("|") + existing->second)) {
-            stitched_edges_by_pair.insert(pair_key, {initiator_peer_id, acceptor_peer_id});
+            || directed_key < existing->value(QStringLiteral("sort_key")).toString()) {
+            stitched_edges_by_pair.insert(pair_key, edge);
         }
     }
 
     for (auto it = stitched_edges_by_pair.cbegin(); it != stitched_edges_by_pair.cend(); ++it) {
-        const auto &initiator_peer_id = it->first;
-        const auto &acceptor_peer_id = it->second;
+        const auto initiator_peer_id = it->value(QStringLiteral("initiator_peer_id")).toString();
+        const auto acceptor_peer_id = it->value(QStringLiteral("acceptor_peer_id")).toString();
         const auto start = stitched_positions.value(initiator_peer_id);
         const auto end = stitched_positions.value(acceptor_peer_id);
         next_stitched_graph_edges.append(make_ego_edge(
@@ -1930,8 +1965,8 @@ void app_controller::refresh_verified_peers()
             start.y(),
             end.x(),
             end.y(),
-            true,
-            QStringLiteral("#5f7f96"),
+            it->value(QStringLiteral("dotted")).toBool(),
+            it->value(QStringLiteral("color")).toString(),
             true));
     }
 

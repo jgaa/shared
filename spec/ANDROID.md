@@ -49,6 +49,7 @@ Android should:
 * send `TopologyAdvertisement` immediately after peer authentication
 * refresh it whenever direct peer connectivity changes
 * retain and forward known directed links learned from connected peers while their TTL remains valid
+* treat `PeerAddress.source = "observed"` as a non-dialable transport observation, not as a normal outbound connection candidate
 
 Android may act as a relay.
 

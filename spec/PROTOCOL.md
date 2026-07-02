@@ -179,6 +179,7 @@ Current desktop values include:
 * `direct`
 * `local`
 * `manual`
+* `observed`
 * any source string received from another peer
 
 Address hints are gossiped to all authenticated peers whenever local address knowledge changes.
@@ -186,8 +187,10 @@ Address hints are gossiped to all authenticated peers whenever local address kno
 Current desktop behavior:
 
 * a peer advertises its own `local` addresses to connected peers
+* peers may rebroadcast directly observed socket endpoints as `observed`
 * peers rebroadcast `local` addresses like other address hints
-* outbound connection attempts prefer `manual`, then `direct`, then `local`, then other hints
+* outbound connection attempts prefer `manual`, then `local`, then `direct`, then other hints
+* outbound connection attempts never dial `observed` endpoints, because they may be NAT mappings or other transport-only addresses
 * outbound connection attempts skip candidates matching the local peer's own advertised interface addresses
 
 ## Reachability and Relay Discovery
@@ -213,7 +216,6 @@ Current desktop behavior:
 * rebroadcast on connect/disconnect and periodically with address republishing
 * includes the local peer's direct authenticated sessions
 * includes directed peer-to-peer links learned from connected peers' topology advertisements
-* may include directed fallback links synthesized from active `ReachabilityAdvertisement` state when no richer topology advertisement is available yet
 
 Relay selection is single-hop only.
 
