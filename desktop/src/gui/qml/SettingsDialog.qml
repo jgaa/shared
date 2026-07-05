@@ -6,12 +6,22 @@ Dialog {
     id: root
     required property var app_controller
 
-    property int currentPane: 0
+    property string currentPane: "local"
     property bool showEnrollmentSettings: !app_controller.configured || app_controller.trusted_agent
+    readonly property bool trustedAgentPaneAvailable: !app_controller.trusted_agent
+    readonly property int stackIndex: {
+        if (currentPane === "local") {
+            return 0
+        }
+        if (currentPane === "trusted" && trustedAgentPaneAvailable) {
+            return 1
+        }
+        return trustedAgentPaneAvailable ? 2 : 1
+    }
 
     function reload() {
-        if (app_controller.trusted_agent && currentPane === 1) {
-            currentPane = 0
+        if (!trustedAgentPaneAvailable && currentPane === "trusted") {
+            currentPane = "local"
         }
 
         local_enrollment_host.text = app_controller.local_enrollment_host
@@ -22,6 +32,7 @@ Dialog {
         trusted_agent_port.value = app_controller.trusted_agent_port
         trusted_agent_peer_port.value = app_controller.trusted_agent_peer_port
         local_socket_enabled.checked = app_controller.local_socket_enabled
+        start_automatically.checked = app_controller.start_automatically
         clipboard_limit.value = app_controller.clipboard_limit_megabytes
         auto_accept_clipboard.checked = app_controller.auto_accept_clipboard
         auto_accept_files.checked = app_controller.auto_accept_files
@@ -47,21 +58,21 @@ Dialog {
 
             Button {
                 text: "Local"
-                highlighted: root.currentPane === 0
-                onClicked: root.currentPane = 0
+                highlighted: root.currentPane === "local"
+                onClicked: root.currentPane = "local"
             }
 
             Button {
-                visible: !app_controller.trusted_agent
+                visible: root.trustedAgentPaneAvailable
                 text: "Trusted Agent"
-                highlighted: root.currentPane === 1
-                onClicked: root.currentPane = 1
+                highlighted: root.currentPane === "trusted"
+                onClicked: root.currentPane = "trusted"
             }
 
             Button {
                 text: "Log"
-                highlighted: root.currentPane === 2
-                onClicked: root.currentPane = 2
+                highlighted: root.currentPane === "log"
+                onClicked: root.currentPane = "log"
             }
 
             Item {
@@ -72,7 +83,7 @@ Dialog {
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.currentPane
+            currentIndex: root.stackIndex
 
             ScrollView {
                 clip: true
@@ -148,6 +159,12 @@ Dialog {
                                 id: local_socket_enabled
                                 onToggled: app_controller.local_socket_enabled = checked
                             }
+
+                            Label { text: "Start automatically" }
+                            CheckBox {
+                                id: start_automatically
+                                onToggled: app_controller.start_automatically = checked
+                            }
                         }
                     }
 
@@ -194,7 +211,6 @@ Dialog {
             }
 
             ScrollView {
-                visible: !app_controller.trusted_agent
                 clip: true
 
                 ColumnLayout {
@@ -285,6 +301,14 @@ Dialog {
             Layout.fillWidth: true
             standardButtons: DialogButtonBox.Close
             onRejected: root.close()
+        }
+    }
+
+    Connections {
+        target: app_controller
+
+        function onTransferSettingsChanged() {
+            root.reload()
         }
     }
 }

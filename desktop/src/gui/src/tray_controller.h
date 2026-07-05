@@ -17,7 +17,7 @@ class tray_controller final : public QObject {
     Q_OBJECT
 
 public:
-    tray_controller(app_controller *controller, QWindow *window, QObject *parent = nullptr);
+    tray_controller(app_controller *controller, QWindow *window, bool start_hidden = false, QObject *parent = nullptr);
     ~tray_controller() override;
 
     [[nodiscard]] bool available() const;

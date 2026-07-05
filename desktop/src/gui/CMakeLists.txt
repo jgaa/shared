@@ -32,6 +32,7 @@ qt_add_resources(sharedui "sharedgui_assets"
 target_link_libraries(sharedui PUBLIC
     Qt6::Concurrent
     Qt6::Core
+    Qt6::DBus
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick

@@ -6,6 +6,7 @@
 #include "shared/desktop/core/local_peer_addresses.h"
 #include "shared/desktop/core/pending_enrollment_repository.h"
 #include "shared/desktop/core/security_materials.h"
+#include "shared/desktop/core/settings_repository.h"
 #include "shared/desktop/core/transfer_crypto.h"
 
 #include "shared.qpb.h"
@@ -111,6 +112,7 @@ private slots:
     void local_peer_addresses_filters_loopback_and_container_interfaces();
     void enrollment_fingerprint_normalization();
     void logging_controller_levels();
+    void settings_repository_round_trip();
     void security_materials_bootstrap_flow();
     void security_materials_reset_local_agent_state();
     void security_materials_remove_peer_from_signed_list();
@@ -435,6 +437,34 @@ void sharedcore_tests::logging_controller_levels()
         shared::desktop::core::logging_controller::disabled_level);
     QVERIFY(
         !shared::desktop::core::logging_controller::parse_log_level_name(QStringLiteral("verbose")).has_value());
+}
+
+void sharedcore_tests::settings_repository_round_trip()
+{
+    QTemporaryDir temporary_dir{};
+    QVERIFY(temporary_dir.isValid());
+    environment_guard guard{temporary_dir};
+
+    shared::desktop::core::settings_repository repository{};
+    QVERIFY(!repository.local_socket_enabled());
+    QVERIFY(!repository.start_automatically());
+    QCOMPARE(
+        repository.clipboard_limit_bytes(),
+        shared::desktop::core::settings_repository::default_clipboard_limit_bytes);
+
+    repository.set_local_socket_enabled(true);
+    repository.set_start_automatically(true);
+    repository.set_clipboard_limit_bytes(2 * 1024 * 1024);
+    repository.set_auto_accept_clipboard(true);
+    repository.set_auto_accept_files(true);
+    repository.set_download_path(QStringLiteral("/tmp/shared-downloads"));
+
+    QVERIFY(repository.local_socket_enabled());
+    QVERIFY(repository.start_automatically());
+    QCOMPARE(repository.clipboard_limit_bytes(), 2 * 1024 * 1024);
+    QVERIFY(repository.auto_accept_clipboard());
+    QVERIFY(repository.auto_accept_files());
+    QCOMPARE(repository.download_path(), QStringLiteral("/tmp/shared-downloads"));
 }
 
 void sharedcore_tests::security_materials_bootstrap_flow()

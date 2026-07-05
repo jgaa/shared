@@ -106,6 +106,7 @@ class app_controller final : public QObject {
     Q_PROPERTY(int status_level_value READ status_level_value NOTIFY state_changed)
     Q_PROPERTY(QVariantList pending_requests READ pending_requests NOTIFY state_changed)
     Q_PROPERTY(bool local_socket_enabled READ local_socket_enabled WRITE set_local_socket_enabled NOTIFY transfer_settings_changed)
+    Q_PROPERTY(bool start_automatically READ start_automatically WRITE set_start_automatically NOTIFY transfer_settings_changed)
     Q_PROPERTY(int clipboard_limit_megabytes READ clipboard_limit_megabytes WRITE set_clipboard_limit_megabytes NOTIFY clipboard_limit_megabytes_changed)
     Q_PROPERTY(bool auto_accept_clipboard READ auto_accept_clipboard WRITE set_auto_accept_clipboard NOTIFY transfer_settings_changed)
     Q_PROPERTY(bool auto_accept_files READ auto_accept_files WRITE set_auto_accept_files NOTIFY transfer_settings_changed)
@@ -178,6 +179,7 @@ public:
     [[nodiscard]] int status_level_value() const;
     [[nodiscard]] QVariantList pending_requests() const;
     [[nodiscard]] bool local_socket_enabled() const;
+    [[nodiscard]] bool start_automatically() const;
     [[nodiscard]] int clipboard_limit_megabytes() const;
     [[nodiscard]] bool auto_accept_clipboard() const;
     [[nodiscard]] bool auto_accept_files() const;
@@ -207,6 +209,7 @@ public:
     void set_auto_accept_files(bool value);
     void set_download_path(const QString &value);
     void set_local_socket_enabled(bool value);
+    void set_start_automatically(bool value);
     void set_local_enrollment_host(const QString &value);
     void set_local_enrollment_port(int value);
     void set_local_peer_host(const QString &value);

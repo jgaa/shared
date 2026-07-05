@@ -86,6 +86,7 @@ if(SHARED_BUILD_GUI)
     list(APPEND shared_qt_optional_components
         Concurrent
         Gui
+        DBus
         Qml
         Quick
         QuickControls2

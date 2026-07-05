@@ -55,6 +55,29 @@ void settings_repository::set_local_socket_enabled(bool value)
     ensure_settings_ok(settings, QStringLiteral("Failed to persist settings"));
 }
 
+bool settings_repository::start_automatically() const
+{
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store"));
+    settings.beginGroup(app_metadata::settings_group_local);
+    const auto value = settings.value(
+        app_metadata::settings_key_start_automatically,
+        false).toBool();
+    settings.endGroup();
+    return value;
+}
+
+void settings_repository::set_start_automatically(bool value)
+{
+    auto settings = create_settings();
+    ensure_settings_ok(settings, QStringLiteral("Failed to open settings store for write"));
+    settings.beginGroup(app_metadata::settings_group_local);
+    settings.setValue(app_metadata::settings_key_start_automatically, value);
+    settings.endGroup();
+    settings.sync();
+    ensure_settings_ok(settings, QStringLiteral("Failed to persist settings"));
+}
+
 int settings_repository::clipboard_limit_bytes() const
 {
     auto settings = create_settings();

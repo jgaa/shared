@@ -14,6 +14,8 @@ public:
 
     [[nodiscard]] bool local_socket_enabled() const;
     void set_local_socket_enabled(bool value);
+    [[nodiscard]] bool start_automatically() const;
+    void set_start_automatically(bool value);
     [[nodiscard]] int clipboard_limit_bytes() const;
     void set_clipboard_limit_bytes(int value);
     [[nodiscard]] bool auto_accept_clipboard() const;

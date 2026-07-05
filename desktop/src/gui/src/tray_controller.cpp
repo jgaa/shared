@@ -125,7 +125,7 @@ QString format_alert_message(
 
 }
 
-tray_controller::tray_controller(app_controller *controller, QWindow *window, QObject *parent)
+tray_controller::tray_controller(app_controller *controller, QWindow *window, bool start_hidden, QObject *parent)
     : QObject{parent}
     , controller_{controller}
     , window_{window}
@@ -179,7 +179,11 @@ tray_controller::tray_controller(app_controller *controller, QWindow *window, QO
     window_->installEventFilter(this);
     tray_icon_->show();
     refresh_state();
-    show_window();
+    if (start_hidden) {
+        hide_window();
+    } else {
+        show_window();
+    }
 }
 
 tray_controller::~tray_controller()

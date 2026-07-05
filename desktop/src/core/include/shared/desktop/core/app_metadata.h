@@ -14,6 +14,7 @@ struct app_metadata {
     static const inline QString settings_group_limits{QStringLiteral("limits")};
     static const inline QString settings_group_transfers{QStringLiteral("transfers")};
     static const inline QString settings_key_local_socket_enabled{QStringLiteral("local_socket_enabled")};
+    static const inline QString settings_key_start_automatically{QStringLiteral("start_automatically")};
     static const inline QString settings_key_clipboard_limit_bytes{QStringLiteral("clipboard_limit_bytes")};
     static const inline QString settings_key_auto_accept_clipboard{QStringLiteral("auto_accept_clipboard")};
     static const inline QString settings_key_auto_accept_files{QStringLiteral("auto_accept_files")};

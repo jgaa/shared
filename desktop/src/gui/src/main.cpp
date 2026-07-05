@@ -58,10 +58,15 @@ int main(int argc, char *argv[])
         {QStringLiteral("T"), QStringLiteral("truncate-log-file")},
         QStringLiteral("Truncate the log file on startup."),
     };
+    QCommandLineOption autostart_option{
+        QStringLiteral("autostart"),
+        QStringLiteral("Start minimized to the system tray."),
+    };
     parser.addOption(log_to_console_option);
     parser.addOption(log_level_option);
     parser.addOption(log_file_option);
     parser.addOption(truncate_log_file_option);
+    parser.addOption(autostart_option);
     parser.process(app);
 
     const auto console_level = parser.isSet(log_to_console_option)
@@ -130,7 +135,11 @@ int main(int argc, char *argv[])
     auto *window = qobject_cast<QWindow *>(engine.rootObjects().constFirst());
     std::unique_ptr<shared::desktop::gui::tray_controller> tray{};
     if (window != nullptr) {
-        tray = std::make_unique<shared::desktop::gui::tray_controller>(&controller, window, &app);
+        tray = std::make_unique<shared::desktop::gui::tray_controller>(
+            &controller,
+            window,
+            parser.isSet(autostart_option),
+            &app);
         app.setQuitOnLastWindowClosed(!tray->available());
     }
 
