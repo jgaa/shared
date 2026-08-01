@@ -154,11 +154,11 @@ Dialog {
                             columnSpacing: 16
                             rowSpacing: 10
 
-                            Label { text: "Enable local socket" }
-                            CheckBox {
-                                id: local_socket_enabled
-                                onToggled: app_controller.local_socket_enabled = checked
-                            }
+                            // Label { text: "Enable local socket" }
+                            // CheckBox {
+                            //     id: local_socket_enabled
+                            //     onToggled: app_controller.local_socket_enabled = checked
+                            // }
 
                             Label { text: "Start automatically" }
                             CheckBox {
