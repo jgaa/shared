@@ -22,6 +22,7 @@ public:
 
     [[nodiscard]] bool start();
     void apply_configuration_change();
+    [[nodiscard]] bool refresh_connections(QString &error_message);
     [[nodiscard]] bool send_clipboard_text(
         const QStringList &peer_ids,
         const QString &text,

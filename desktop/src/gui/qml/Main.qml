@@ -67,6 +67,15 @@ ApplicationWindow {
             title: "File"
 
             Action {
+                text: "Refresh"
+                enabled: app_controller.configured
+                onTriggered: app_controller.refresh_connections()
+            }
+
+            MenuSeparator {
+            }
+
+            Action {
                 text: "Send Clipboard..."
                 enabled: app_controller.configured
                 onTriggered: send_clipboard_dialog.open()

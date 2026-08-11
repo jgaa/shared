@@ -940,6 +940,13 @@ void peer_service::refresh_peer_list()
     attempt_connections();
 }
 
+void peer_service::refresh_connections()
+{
+    qCInfo(shared_peer_service_log) << "Forcing peer connection refresh";
+    outbound_retry_states_.clear();
+    attempt_connections();
+}
+
 void peer_service::attempt_connections()
 {
     QString error_message{};

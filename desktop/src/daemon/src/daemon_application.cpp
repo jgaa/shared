@@ -54,6 +54,17 @@ void daemon_application::apply_configuration_change()
     (void)reload_configuration_impl();
 }
 
+bool daemon_application::refresh_connections(QString &error_message)
+{
+    if (peer_service_ == nullptr) {
+        error_message = QStringLiteral("Peer service is not running");
+        return false;
+    }
+
+    peer_service_->refresh_connections();
+    return true;
+}
+
 bool daemon_application::send_clipboard_text(
     const QStringList &peer_ids,
     const QString &text,

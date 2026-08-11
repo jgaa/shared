@@ -91,6 +91,8 @@ class app_controller final : public QObject {
     Q_PROPERTY(QString trusted_agent_fingerprint READ trusted_agent_fingerprint NOTIFY state_changed)
     Q_PROPERTY(QAbstractListModel* verified_peers READ verified_peers CONSTANT)
     Q_PROPERTY(int verified_peer_count READ verified_peer_count NOTIFY peers_changed)
+    Q_PROPERTY(QAbstractListModel* available_peers READ available_peers CONSTANT)
+    Q_PROPERTY(int available_peer_count READ available_peer_count NOTIFY peers_changed)
     Q_PROPERTY(bool direct_peer_connected READ direct_peer_connected NOTIFY peers_changed)
     Q_PROPERTY(bool copy_targets_available READ copy_targets_available NOTIFY peers_changed)
     Q_PROPERTY(QVariantList ego_graph_nodes READ ego_graph_nodes NOTIFY peers_changed)
@@ -164,6 +166,8 @@ public:
     [[nodiscard]] QString trusted_agent_fingerprint() const;
     [[nodiscard]] QAbstractListModel *verified_peers() const;
     [[nodiscard]] int verified_peer_count() const;
+    [[nodiscard]] QAbstractListModel *available_peers() const;
+    [[nodiscard]] int available_peer_count() const;
     [[nodiscard]] bool direct_peer_connected() const;
     [[nodiscard]] bool copy_targets_available() const;
     [[nodiscard]] QVariantList ego_graph_nodes() const;
@@ -223,6 +227,7 @@ public:
     void set_prune_log_file(bool value);
 
     Q_INVOKABLE void reload_state();
+    Q_INVOKABLE bool refresh_connections();
     Q_INVOKABLE bool reinitialize_local_agent();
     Q_INVOKABLE bool decommission();
     Q_INVOKABLE bool initialize_local_trusted_agent(const QString &name, int enrollment_port);
@@ -324,6 +329,7 @@ private:
     core::agent_configuration configuration_{};
     QString trusted_agent_fingerprint_{};
     verified_peers_model verified_peers_{this};
+    verified_peers_model available_peers_{this};
     QVariantList ego_graph_nodes_{};
     QVariantList ego_graph_edges_{};
     int ego_graph_width_{900};
@@ -354,6 +360,7 @@ private:
     QTimer log_refresh_timer_{};
     QTimer peer_refresh_timer_{};
     QTimer pending_request_refresh_timer_{};
+    QTimer refresh_status_timer_{};
 };
 
 }

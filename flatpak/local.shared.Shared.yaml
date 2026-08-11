@@ -10,6 +10,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
+  # QSystemTrayIcon registers its KDE StatusNotifier item through this bus name.
+  - --talk-name=org.kde.StatusNotifierWatcher
   - --filesystem=host:ro
   - --filesystem=xdg-download
   - --talk-name=org.freedesktop.portal.Desktop

@@ -709,6 +709,13 @@ app_controller::app_controller(QObject *parent)
     connect(&pending_request_refresh_timer_, &QTimer::timeout, this, &app_controller::refresh_pending_requests);
     pending_request_refresh_timer_.setInterval(500);
     pending_request_refresh_timer_.start();
+    refresh_status_timer_.setSingleShot(true);
+    refresh_status_timer_.setInterval(7000);
+    connect(&refresh_status_timer_, &QTimer::timeout, this, [this]() {
+        if (status_message_ == QStringLiteral("Refreshing peer connections")) {
+            clear_status_message();
+        }
+    });
     connect(&join_watcher_, &QFutureWatcher<core::enrollment_client::result>::finished, this, &app_controller::finish_join_request);
     refresh_log_lines();
     refresh_verified_peers();
@@ -866,6 +873,16 @@ int app_controller::verified_peer_count() const
     return verified_peers_.rowCount();
 }
 
+QAbstractListModel *app_controller::available_peers() const
+{
+    return const_cast<verified_peers_model *>(&available_peers_);
+}
+
+int app_controller::available_peer_count() const
+{
+    return available_peers_.rowCount();
+}
+
 bool app_controller::direct_peer_connected() const
 {
     return std::any_of(verified_peers_.rows().cbegin(), verified_peers_.rows().cend(), [](const auto &peer) {
@@ -875,9 +892,7 @@ bool app_controller::direct_peer_connected() const
 
 bool app_controller::copy_targets_available() const
 {
-    return std::any_of(verified_peers_.rows().cbegin(), verified_peers_.rows().cend(), [](const auto &peer) {
-        return peer.status_label != QStringLiteral("Unavailable");
-    });
+    return available_peer_count() > 0;
 }
 
 QVariantList app_controller::ego_graph_nodes() const
@@ -1636,7 +1651,7 @@ bool app_controller::send_clipboard_to_all()
     }
 
     QStringList peer_ids{};
-    for (const auto &peer : verified_peers_.rows()) {
+    for (const auto &peer : available_peers_.rows()) {
         if (peer.peer_id.isEmpty()) {
             continue;
         }
@@ -1663,6 +1678,13 @@ bool app_controller::send_clipboard_to_peer(const QString &peer_id)
 {
     if (service_ == nullptr) {
         set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    const auto available = std::any_of(available_peers_.rows().cbegin(), available_peers_.rows().cend(),
+        [&peer_id](const auto &peer) { return peer.peer_id == peer_id; });
+    if (!available) {
+        set_last_error(QStringLiteral("Selected peer is currently unavailable"));
         return false;
     }
 
@@ -1717,7 +1739,7 @@ bool app_controller::send_files_to_all(const QStringList &file_paths)
     }
 
     QStringList peer_ids{};
-    for (const auto &peer : verified_peers_.rows()) {
+    for (const auto &peer : available_peers_.rows()) {
         if (!peer.peer_id.isEmpty()) {
             peer_ids.append(peer.peer_id);
         }
@@ -1750,6 +1772,13 @@ bool app_controller::send_files_to_peer(const QString &peer_id, const QStringLis
 {
     if (service_ == nullptr) {
         set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    const auto available = std::any_of(available_peers_.rows().cbegin(), available_peers_.rows().cend(),
+        [&peer_id](const auto &peer) { return peer.peer_id == peer_id; });
+    if (!available) {
+        set_last_error(QStringLiteral("Selected peer is currently unavailable"));
         return false;
     }
 
@@ -1820,6 +1849,25 @@ bool app_controller::remove_authorized_peer(const QString &peer_id)
 void app_controller::copy_to_clipboard(const QString &text)
 {
     QGuiApplication::clipboard()->setText(text);
+}
+
+bool app_controller::refresh_connections()
+{
+    if (service_ == nullptr) {
+        set_last_error(QStringLiteral("Background service is unavailable"));
+        return false;
+    }
+
+    QString error_message{};
+    if (!service_->refresh_connections(error_message)) {
+        set_last_error(error_message);
+        return false;
+    }
+
+    refresh_verified_peers();
+    set_ok_message(QStringLiteral("Refreshing peer connections"));
+    refresh_status_timer_.start();
+    return true;
 }
 
 bool app_controller::approve_clipboard_transfer()
@@ -2048,6 +2096,7 @@ void app_controller::refresh_log_lines()
 void app_controller::refresh_verified_peers()
 {
     QList<verified_peers_model::peer_row> next_peers{};
+    QList<verified_peers_model::peer_row> next_available_peers{};
 
     QString peer_list_error{};
     const auto peer_list = security_materials_.current_peer_list(peer_list_error);
@@ -2102,7 +2151,7 @@ void app_controller::refresh_verified_peers()
         const auto last_known_port = status.value(QStringLiteral("last_known_port")).toInt();
         const auto address = status.value(QStringLiteral("address")).toString();
         const auto port = status.value(QStringLiteral("port")).toInt();
-        next_peers.append({
+        const verified_peers_model::peer_row next_peer{
             .peer_id = peer_id,
             .name = entry.identity().name(),
             .status_label = status_label,
@@ -2111,7 +2160,11 @@ void app_controller::refresh_verified_peers()
             .last_known_address = format_socket_address(last_known_ip, last_known_port),
             .last_communicated = format_elapsed(
                 status.value(QStringLiteral("last_communication_time_ms")).toString().toLongLong()),
-        });
+        };
+        next_peers.append(next_peer);
+        if (connected || relay_available) {
+            next_available_peers.append(next_peer);
+        }
 
         const QVariantMap graph_peer{
             {QStringLiteral("peer_id"), peer_id},
@@ -2357,12 +2410,21 @@ void app_controller::refresh_verified_peers()
     stitched_graph_width_ = next_stitched_graph_width;
     stitched_graph_height_ = next_stitched_graph_height;
 
-    if (next_peers.size() == verified_peers_.rowCount()) {
+    if (next_peers.size() == verified_peers_.rowCount()
+        && next_available_peers.size() == available_peers_.rowCount()) {
         auto identical = true;
         for (auto i = 0; i < next_peers.size(); ++i) {
             if (next_peers.at(i) != verified_peers_.rows().at(i)) {
                 identical = false;
                 break;
+            }
+        }
+        if (identical) {
+            for (auto i = 0; i < next_available_peers.size(); ++i) {
+                if (next_available_peers.at(i) != available_peers_.rows().at(i)) {
+                    identical = false;
+                    break;
+                }
             }
         }
         if (identical && !graph_changed && !stitched_graph_changed) {
@@ -2371,6 +2433,7 @@ void app_controller::refresh_verified_peers()
     }
 
     verified_peers_.replace_rows(std::move(next_peers));
+    available_peers_.replace_rows(std::move(next_available_peers));
     emit peers_changed();
 }
 

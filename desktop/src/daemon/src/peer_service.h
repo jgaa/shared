@@ -34,6 +34,7 @@ public:
 
     [[nodiscard]] bool start(QString &error_message);
     void stop();
+    void refresh_connections();
     [[nodiscard]] bool send_clipboard_text(
         const QStringList &peer_ids,
         const QString &text,
