@@ -53,6 +53,20 @@ Android should:
 
 Android may act as a relay.
 
+### Address-gossip limits (desktop compatibility update)
+
+`AddressHint` remains wire-compatible.  To prevent gossip amplification, desktop
+now keeps and publishes at most five distinct IP addresses for one peer in a
+single hint. Android should apply the same bound before storing, forwarding, or
+publishing hints. It should deduplicate by IP, retain the most recently seen
+endpoint, and continue to prefer `manual`, `local`, and `direct` addresses when
+dialing.
+
+Network callbacks must not synchronously rewrite status files or run large log
+formatting work.  Coalesce UI/status updates; run multi-megabyte AES-GCM work on
+a worker dispatcher and use coroutine-based asynchronous socket waits for
+backpressure, so a transfer or gossip burst cannot block the UI.
+
 ## Transfers
 
 Android must implement both current transfer types:

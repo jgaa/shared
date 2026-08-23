@@ -4,6 +4,7 @@
 #include "shared/desktop/core/local_peer_addresses.h"
 
 #include <QCoroIODevice>
+#include <QCoroFuture>
 #include <QCoroSignal>
 
 #include <QtCore/QDateTime>
@@ -22,6 +23,7 @@
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTemporaryFile>
 #include <QtCore/QUuid>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QSslConfiguration>
 #include <QtNetwork/QSslKey>
@@ -42,6 +44,9 @@ constexpr qsizetype socket_backlog_limit_bytes{2 * 1024 * 1024};
 constexpr qsizetype transfer_queue_limit_bytes{3 * static_cast<qsizetype>(transfer_chunk_size)};
 constexpr auto keepalive_interval_ms{15000};
 constexpr auto address_hint_republish_interval_ms{30000};
+constexpr auto peer_status_snapshot_coalesce_ms{1000};
+constexpr qsizetype max_remembered_ips_per_peer{5};
+constexpr qint64 outbound_address_retry_delay_ms{3000};
 constexpr auto reachability_ttl_ms{90000};
 constexpr auto topology_ttl_ms{90000};
 constexpr auto reachability_broadcast_min_delay_ms{500};
@@ -49,6 +54,11 @@ constexpr auto reachability_broadcast_max_delay_ms{1500};
 constexpr auto outbound_connect_timeout_ms{10000};
 constexpr qint64 outbound_retry_initial_delay_ms{5000};
 constexpr qint64 outbound_retry_max_delay_ms{5 * 60 * 1000};
+
+struct encrypted_chunk_result {
+    core::transfer_crypto::encrypted_payload payload{};
+    QString error{};
+};
 
 QString build_numbered_filename(const QString &base_name, const QString &suffix, int index)
 {
@@ -168,6 +178,28 @@ QList<shared::v1::PeerAddress> prioritized_addresses(QList<shared::v1::PeerAddre
     return addresses;
 }
 
+QList<shared::v1::PeerAddress> bounded_addresses(const QList<shared::v1::PeerAddress> &addresses)
+{
+    QList<shared::v1::PeerAddress> result{};
+    QSet<QString> seen{};
+    result.reserve(std::min(addresses.size(), max_remembered_ips_per_peer));
+    for (const auto &address : addresses) {
+        if (address.ip().isEmpty() || address.port() == 0) {
+            continue;
+        }
+        const auto key = address.ip();
+        if (seen.contains(key)) {
+            continue;
+        }
+        seen.insert(key);
+        result.append(address);
+        if (result.size() == max_remembered_ips_per_peer) {
+            break;
+        }
+    }
+    return result;
+}
+
 bool is_self_advertised_address(
     const QList<shared::v1::PeerAddress> &local_addresses,
     const shared::v1::PeerAddress &candidate)
@@ -215,6 +247,13 @@ peer_service::peer_service(
         &QTimer::timeout,
         this,
         &peer_service::flush_reachability_broadcast);
+
+    peer_status_snapshot_timer_.setSingleShot(true);
+    peer_status_snapshot_timer_.setInterval(peer_status_snapshot_coalesce_ms);
+    connect(&peer_status_snapshot_timer_, &QTimer::timeout, this, [this]() {
+        peer_status_snapshot_write_due_ = true;
+        write_peer_status_snapshot();
+    });
 }
 
 peer_service::~peer_service()
@@ -234,6 +273,13 @@ bool peer_service::start(QString &error_message)
 
     current_peer_list_version_ = peer_list.version();
     current_peer_list_bytes_ = serialize_peer_list(peer_list);
+    bool address_hints_trimmed{};
+    address_hint_repository_.cap_addresses_per_peer(max_remembered_ips_per_peer, address_hints_trimmed);
+    if (address_hints_trimmed) {
+        qCWarning(shared_peer_service_log)
+            << "Trimmed persisted address hints to gossip safety limit"
+            << "maximum_per_peer=" << max_remembered_ips_per_peer;
+    }
     refresh_local_address_hints();
 
     if (!configure_server(error_message)) {
@@ -252,6 +298,7 @@ bool peer_service::start(QString &error_message)
         << "port=" << configuration_.peer_port
         << "role=" << static_cast<int>(configuration_.role)
         << "peer_list_version=" << current_peer_list_version_;
+    peer_status_snapshot_write_due_ = true;
     write_peer_status_snapshot();
     return true;
 }
@@ -263,6 +310,7 @@ void peer_service::stop()
     keepalive_timer_.stop();
     address_hint_republish_timer_.stop();
     reachability_broadcast_timer_.stop();
+    peer_status_snapshot_timer_.stop();
     reachability_broadcast_pending_ = false;
 
     server_.close();
@@ -277,6 +325,8 @@ void peer_service::stop()
     socket_send_states_.clear();
     pending_connections_.clear();
     outbound_retry_states_.clear();
+    outbound_address_cursors_.clear();
+    outbound_address_counts_.clear();
     reachability_claims_by_target_.clear();
     topology_snapshots_by_peer_.clear();
     pending_who_has_queries_.clear();
@@ -299,6 +349,7 @@ void peer_service::stop()
     incoming_file_transfers_.clear();
     outgoing_clipboard_transfers_.clear();
     outgoing_file_transfers_.clear();
+    peer_status_snapshot_write_due_ = true;
     write_peer_status_snapshot();
 }
 
@@ -943,7 +994,20 @@ void peer_service::refresh_peer_list()
 void peer_service::refresh_connections()
 {
     qCInfo(shared_peer_service_log) << "Forcing peer connection refresh";
+    // A failed TCP/TLS attempt can remain in the socket table until its timeout,
+    // which previously made Refresh a no-op for that peer.
+    QList<QSslSocket *> pending_outbound_sockets{};
+    for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+        if (it.value().outbound && !it.value().authenticated) {
+            pending_outbound_sockets.append(it.key());
+        }
+    }
+    for (auto *socket : pending_outbound_sockets) {
+        close_socket(socket, QStringLiteral("Superseded by manual connection refresh"));
+    }
     outbound_retry_states_.clear();
+    outbound_address_cursors_.clear();
+    outbound_address_counts_.clear();
     attempt_connections();
 }
 
@@ -1312,7 +1376,8 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 {
     const auto all_addresses = known_addresses_with_live_sessions();
     for (auto it = all_addresses.begin(); it != all_addresses.end(); ++it) {
-        if (it.value().isEmpty()) {
+        const auto addresses = bounded_addresses(it.value());
+        if (addresses.isEmpty()) {
             continue;
         }
 
@@ -1321,13 +1386,13 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 
         shared::v1::AddressHint address_hint{};
         address_hint.setPeerId(peer_id);
-        address_hint.setAddresses(it.value());
+        address_hint.setAddresses(addresses);
 
         qCDebug(shared_peer_service_log)
             << "Sending known address hints"
             << "target_peer=" << sessions_.value(socket).remote_peer_id
             << "hinted_peer_id=" << it.key()
-            << "address_count=" << it.value().size();
+            << "address_count=" << addresses.size();
 
         auto envelope = make_envelope(next_message_id());
         envelope.setAddressHint(address_hint);
@@ -1509,7 +1574,7 @@ void peer_service::send_envelope(
     }
 
     const auto bytes = core::envelope_io::serialize(envelope);
-    qCInfo(shared_peer_service_log)
+    qCDebug(shared_peer_service_log)
         << "sending"
         << context
         << "message_id=" << envelope.messageId()
@@ -1540,11 +1605,26 @@ void peer_service::note_peer_activity(QSslSocket *socket, bool publish_observed_
             QStringLiteral("observed"),
             socket);
     }
-    write_peer_status_snapshot();
+    schedule_peer_status_snapshot();
+}
+
+void peer_service::schedule_peer_status_snapshot()
+{
+    if (!peer_status_snapshot_timer_.isActive()) {
+        peer_status_snapshot_timer_.start();
+    }
 }
 
 void peer_service::write_peer_status_snapshot()
 {
+    // Payloads can arrive in many small frames. Defer the expensive JSON and
+    // atomic-file update until a quiet point in the event loop.
+    if (!peer_status_snapshot_write_due_) {
+        schedule_peer_status_snapshot();
+        return;
+    }
+    peer_status_snapshot_write_due_ = false;
+
     const auto claims_changed = purge_expired_reachability_claims();
     if (claims_changed) {
         qCInfo(shared_peer_service_log) << "Purged expired reachability claims";
@@ -1690,11 +1770,6 @@ void peer_service::handle_socket_ready_read(QSslSocket *socket)
     }
 
     session_it->buffer.append(socket->readAll());
-    qCInfo(shared_peer_service_log)
-        << "received peer bytes"
-        << "address=" << socket->peerAddress().toString()
-        << "port=" << socket->peerPort()
-        << "buffer=" << session_it->buffer.size();
 
     while (!session_it->buffer.isEmpty()) {
         shared::v1::Envelope envelope{};
@@ -2046,7 +2121,15 @@ void peer_service::handle_address_hint(QSslSocket *socket, const shared::v1::Add
         << "hinted_peer_id=" << address_hint.peerId().uuid()
         << "address_count=" << address_hint.addresses().size();
 
-    merge_claimed_addresses(address_hint.peerId().uuid(), address_hint.addresses(), socket);
+    const auto addresses = bounded_addresses(address_hint.addresses());
+    if (addresses.size() != address_hint.addresses().size()) {
+        qCWarning(shared_peer_service_log)
+            << "Truncated excessive or invalid address hint"
+            << "hinted_peer_id=" << address_hint.peerId().uuid()
+            << "received_count=" << address_hint.addresses().size()
+            << "accepted_count=" << addresses.size();
+    }
+    merge_claimed_addresses(address_hint.peerId().uuid(), addresses, socket);
 }
 
 void peer_service::handle_reachability_advertisement(
@@ -3185,42 +3268,22 @@ void peer_service::maybe_connect_to_peer(
         return;
     }
 
+    QList<shared::v1::PeerAddress> candidates{};
     for (const auto &address : prioritized_addresses(addresses)) {
-        if (address.ip().isEmpty() || address.port() == 0) {
-            qCDebug(shared_peer_service_log)
-                << "Skipping peer address candidate"
-                << "peer_id=" << peer_id
-                << "name=" << peer.identity().name()
-                << "ip=" << address.ip()
-                << "port=" << address.port()
-                << "source=" << address.source()
-                << "reason=" << "invalid-address";
+        if (address.ip().isEmpty()
+            || address.port() == 0
+            || address.source() == QStringLiteral("observed")
+            || is_self_advertised_address(local_addresses, address)) {
             continue;
         }
+        candidates.append(address);
+    }
 
-        if (address.source() == QStringLiteral("observed")) {
-            qCDebug(shared_peer_service_log)
-                << "Skipping peer address candidate"
-                << "peer_id=" << peer_id
-                << "name=" << peer.identity().name()
-                << "ip=" << address.ip()
-                << "port=" << address.port()
-                << "source=" << address.source()
-                << "reason=" << "observed-address-not-dialable";
-            continue;
-        }
-
-        if (is_self_advertised_address(local_addresses, address)) {
-            qCDebug(shared_peer_service_log)
-                << "Skipping peer address candidate"
-                << "peer_id=" << peer_id
-                << "name=" << peer.identity().name()
-                << "ip=" << address.ip()
-                << "port=" << address.port()
-                << "source=" << address.source()
-                << "reason=" << "self-address";
-            continue;
-        }
+    if (!candidates.isEmpty()) {
+        const auto candidate_count = static_cast<quint32>(candidates.size());
+        outbound_address_counts_.insert(peer_id, candidate_count);
+        const auto candidate_index = outbound_address_cursors_.value(peer_id) % candidate_count;
+        const auto &address = candidates.at(candidate_index);
 
         auto *socket = new QSslSocket{this};
         QString error_message{};
@@ -3330,22 +3393,32 @@ void peer_service::note_outbound_connection_failure(const QString &peer_id)
         return;
     }
 
+    const auto candidate_count = outbound_address_counts_.value(peer_id, 1);
+    auto &cursor = outbound_address_cursors_[peer_id];
+    cursor += 1;
+
     auto &retry_state = outbound_retry_states_[peer_id];
     retry_state.consecutive_failures += 1;
 
-    qint64 delay_ms = outbound_retry_initial_delay_ms;
-    for (quint32 index = 1; index < retry_state.consecutive_failures; ++index) {
-        if (delay_ms >= outbound_retry_max_delay_ms / 2) {
-            delay_ms = outbound_retry_max_delay_ms;
-            break;
+    // Walk the remembered endpoints before exponential backoff. This gives a
+    // roaming device time to move between LANs without aggressively probing.
+    const auto trying_next_address = candidate_count > 1 && cursor % candidate_count != 0;
+    qint64 delay_ms = outbound_address_retry_delay_ms;
+    if (!trying_next_address) {
+        delay_ms = outbound_retry_initial_delay_ms;
+        for (quint32 index = 1; index < retry_state.consecutive_failures; ++index) {
+            if (delay_ms >= outbound_retry_max_delay_ms / 2) {
+                delay_ms = outbound_retry_max_delay_ms;
+                break;
+            }
+            delay_ms *= 2;
         }
-        delay_ms *= 2;
-    }
 
-    if (delay_ms < outbound_retry_max_delay_ms) {
-        const auto jitter_limit_ms = std::max<qint64>(1, delay_ms / 5);
-        delay_ms += static_cast<qint64>(
-            QRandomGenerator::global()->bounded(static_cast<int>(jitter_limit_ms)));
+        if (delay_ms < outbound_retry_max_delay_ms) {
+            const auto jitter_limit_ms = std::max<qint64>(1, delay_ms / 5);
+            delay_ms += static_cast<qint64>(
+                QRandomGenerator::global()->bounded(static_cast<int>(jitter_limit_ms)));
+        }
     }
 
     retry_state.next_attempt_time_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch() + delay_ms;
@@ -3354,6 +3427,7 @@ void peer_service::note_outbound_connection_failure(const QString &peer_id)
         << "Deferring outbound peer reconnect"
         << "peer_id=" << peer_id
         << "failure_count=" << retry_state.consecutive_failures
+        << "next_address=" << (cursor % candidate_count)
         << "delay_ms=" << delay_ms;
 }
 
@@ -3368,6 +3442,8 @@ void peer_service::reset_outbound_connection_backoff(const QString &peer_id)
             << "Cleared outbound peer reconnect backoff"
             << "peer_id=" << peer_id;
     }
+    outbound_address_cursors_.remove(peer_id);
+    outbound_address_counts_.remove(peer_id);
 }
 
 QStringList peer_service::current_directly_connected_peer_ids() const
@@ -3901,14 +3977,15 @@ void peer_service::merge_claimed_addresses(
     const QList<shared::v1::PeerAddress> &addresses,
     QSslSocket *exclude_socket)
 {
+    const auto accepted_addresses = bounded_addresses(addresses);
     bool changed{};
-    address_hint_repository_.merge_addresses(peer_id, addresses, changed);
+    address_hint_repository_.merge_addresses(peer_id, accepted_addresses, changed);
     qCDebug(shared_peer_service_log)
         << "Merged claimed addresses"
         << "peer_id=" << peer_id
-        << "address_count=" << addresses.size()
+        << "address_count=" << accepted_addresses.size()
         << "changed=" << changed;
-    if (!changed || addresses.isEmpty()) {
+    if (!changed || accepted_addresses.isEmpty()) {
         return;
     }
 
@@ -3920,7 +3997,7 @@ void peer_service::merge_claimed_addresses(
 
     shared::v1::AddressHint address_hint{};
     address_hint.setPeerId(hinted_peer_id);
-    address_hint.setAddresses(addresses);
+    address_hint.setAddresses(accepted_addresses);
     broadcast_address_hint(address_hint, exclude_socket);
 }
 
@@ -4320,18 +4397,22 @@ QCoro::Task<> peer_service::run_outgoing_file_transfer(QString transfer_id)
             co_return;
         }
 
-        QString crypto_error{};
-        const auto encrypted_chunk = core::transfer_crypto::encrypt_aes_gcm(
-            transfer_it->payload_key,
-            plaintext,
-            crypto_error);
-        if (encrypted_chunk.ciphertext.isEmpty() && !plaintext.isEmpty()) {
+        // AES-GCM over a multi-megabyte chunk is CPU work. Keep it off the
+        // service/UI event loop and resume this QCoro workflow when it is done.
+        const auto encryption = co_await qCoro(QtConcurrent::run(
+            [payload_key = transfer_it->payload_key, plaintext]() {
+                encrypted_chunk_result result{};
+                result.payload = core::transfer_crypto::encrypt_aes_gcm(
+                    payload_key, plaintext, result.error);
+                return result;
+            })).result();
+        if (encryption.payload.ciphertext.isEmpty() && !plaintext.isEmpty()) {
             emit_file_transfer_status(
                 transfer_id,
                 transfer_it->recipient_peer_id,
                 transfer_it->recipient_name,
                 shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
-                crypto_error);
+                encryption.error);
             co_return;
         }
 
@@ -4342,9 +4423,9 @@ QCoro::Task<> peer_service::run_outgoing_file_transfer(QString transfer_id)
         chunk.setTransferId(transfer_id_message);
         chunk.setChunkIndex(chunk_index);
         chunk.setOffset(offset);
-        chunk.setCiphertext(encrypted_chunk.ciphertext);
-        chunk.setNonce(encrypted_chunk.nonce);
-        chunk.setAuthTag(encrypted_chunk.auth_tag);
+        chunk.setCiphertext(encryption.payload.ciphertext);
+        chunk.setNonce(encryption.payload.nonce);
+        chunk.setAuthTag(encryption.payload.auth_tag);
 
         auto envelope = make_envelope(next_message_id());
         envelope.setTransferChunk(chunk);

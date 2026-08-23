@@ -95,6 +95,7 @@ private slots:
     void send_keepalives();
     void republish_known_address_hints();
     void flush_reachability_broadcast();
+    void schedule_peer_status_snapshot();
 
 private:
     struct session_state {
@@ -235,6 +236,7 @@ private:
     void send_known_address_hints(QSslSocket *socket);
     [[nodiscard]] QHash<QString, QList<shared::v1::PeerAddress>> known_addresses_with_live_sessions() const;
     void refresh_local_address_hints();
+    void write_peer_status_snapshot();
     void send_keepalive(QSslSocket *socket, quint64 reply_to_time_ms = 0);
     void send_current_reachability(QSslSocket *socket);
     void send_current_topology(QSslSocket *socket);
@@ -246,7 +248,6 @@ private:
         const QString &context,
         outbound_priority priority = outbound_priority::normal);
     void note_peer_activity(QSslSocket *socket, bool publish_observed_address = true);
-    void write_peer_status_snapshot();
     void process_authenticated_envelope(
         QSslSocket *socket,
         const shared::v1::Envelope &envelope);
@@ -434,13 +435,17 @@ private:
     QHash<QString, incoming_file_transfer> incoming_file_transfers_{};
     QSet<QString> pending_connections_{};
     QHash<QString, outbound_retry_state> outbound_retry_states_{};
+    QHash<QString, quint32> outbound_address_cursors_{};
+    QHash<QString, quint32> outbound_address_counts_{};
     QTimer peer_list_refresh_timer_{};
     QTimer connect_timer_{};
     QTimer keepalive_timer_{};
     QTimer address_hint_republish_timer_{};
     QTimer reachability_broadcast_timer_{};
+    QTimer peer_status_snapshot_timer_{};
     quint32 next_request_id_{1};
     bool reachability_broadcast_pending_{};
+    bool peer_status_snapshot_write_due_{};
     QByteArray current_peer_list_bytes_{};
     quint32 current_peer_list_version_{};
 };

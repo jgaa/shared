@@ -29,6 +29,7 @@ public:
         const QString &source,
         const QList<shared::v1::PeerAddress> &addresses,
         bool &changed) const;
+    void cap_addresses_per_peer(qsizetype maximum, bool &changed) const;
 
 private:
     [[nodiscard]] QHash<QString, QList<shared::v1::PeerAddress>> read_file() const;

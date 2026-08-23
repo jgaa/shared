@@ -17,6 +17,8 @@
 #include <QtCore/QTemporaryDir>
 #include <QtTest/QTest>
 
+#include <algorithm>
+
 namespace {
 
 Q_LOGGING_CATEGORY(sharedcore_tests_log, "shared.desktop.tests")
@@ -344,10 +346,42 @@ void sharedcore_tests::address_hint_repository_round_trip()
 
     const auto with_local = repository.load_for_peer(QStringLiteral("peer-1"));
     QCOMPARE(with_local.size(), 3);
-    QCOMPARE(with_local.at(0).ip(), QStringLiteral("10.0.0.10"));
-    QCOMPARE(with_local.at(1).ip(), QStringLiteral("198.51.100.10"));
+    QCOMPARE(with_local.at(0).ip(), QStringLiteral("198.51.100.10"));
+    QCOMPARE(with_local.at(1).ip(), QStringLiteral("10.0.0.10"));
     QCOMPARE(with_local.at(2).ip(), QStringLiteral("10.0.0.20"));
     QCOMPARE(with_local.at(2).source(), QStringLiteral("local"));
+
+    for (int index = 0; index < 5; ++index) {
+        shared::v1::PeerAddress roaming{};
+        roaming.setIp(QStringLiteral("172.16.0.%1").arg(index + 1));
+        roaming.setPort(47124);
+        roaming.setSource(QStringLiteral("local"));
+        repository.merge_address(QStringLiteral("peer-2"), roaming, changed);
+        QVERIFY(changed);
+    }
+    const auto roaming_addresses = repository.load_for_peer(QStringLiteral("peer-2"));
+    QCOMPARE(roaming_addresses.size(), 5);
+    QCOMPARE(roaming_addresses.first().ip(), QStringLiteral("172.16.0.5"));
+
+    shared::v1::PeerAddress most_recent{};
+    most_recent.setIp(QStringLiteral("172.16.0.1"));
+    most_recent.setPort(47124);
+    most_recent.setSource(QStringLiteral("local"));
+    repository.merge_address(QStringLiteral("peer-2"), most_recent, changed);
+    QVERIFY(changed);
+    QCOMPARE(repository.load_for_peer(QStringLiteral("peer-2")).first().ip(), QStringLiteral("172.16.0.1"));
+
+    shared::v1::PeerAddress sixth{};
+    sixth.setIp(QStringLiteral("172.16.0.6"));
+    sixth.setPort(47124);
+    sixth.setSource(QStringLiteral("local"));
+    repository.merge_address(QStringLiteral("peer-2"), sixth, changed);
+    const auto capped_addresses = repository.load_for_peer(QStringLiteral("peer-2"));
+    QCOMPARE(capped_addresses.size(), 5);
+    QCOMPARE(capped_addresses.first().ip(), QStringLiteral("172.16.0.6"));
+    QVERIFY(std::none_of(capped_addresses.cbegin(), capped_addresses.cend(), [](const auto &address) {
+        return address.ip() == QStringLiteral("172.16.0.2");
+    }));
 }
 
 void sharedcore_tests::local_peer_addresses_filters_loopback_and_container_interfaces()

@@ -48,6 +48,74 @@ bool addresses_match(const shared::v1::PeerAddress &left, const shared::v1::Peer
         && left.source() == right.source();
 }
 
+int address_source_priority(const QString &source)
+{
+    if (source == QStringLiteral("manual")) {
+        return 0;
+    }
+    if (source == QStringLiteral("local")) {
+        return 1;
+    }
+    if (source == QStringLiteral("direct")) {
+        return 2;
+    }
+    if (source == QStringLiteral("observed")) {
+        return 3;
+    }
+    return 4;
+}
+
+void touch_lru_address(
+    QList<shared::v1::PeerAddress> &addresses,
+    const shared::v1::PeerAddress &address)
+{
+    auto existing_index = -1;
+    for (qsizetype index = 0; index < addresses.size(); ++index) {
+        if (addresses.at(index).ip() != address.ip()) {
+            continue;
+        }
+        if (existing_index < 0
+            || address_source_priority(addresses.at(index).source())
+                < address_source_priority(addresses.at(existing_index).source())) {
+            existing_index = static_cast<int>(index);
+        }
+    }
+
+    // An observed transport address must never displace a peer's own advertised
+    // endpoint for the same IP.
+    const auto use_existing = existing_index >= 0
+        && address_source_priority(addresses.at(existing_index).source())
+            < address_source_priority(address.source());
+    const auto selected = use_existing ? addresses.at(existing_index) : address;
+    for (qsizetype index = addresses.size(); index > 0; --index) {
+        if (addresses.at(index - 1).ip() == address.ip()) {
+            addresses.removeAt(index - 1);
+        }
+    }
+    addresses.prepend(selected);
+}
+
+void trim_lru_addresses(QList<shared::v1::PeerAddress> &addresses, qsizetype maximum)
+{
+    QList<shared::v1::PeerAddress> normalized{};
+    for (const auto &address : addresses) {
+        if (address.ip().isEmpty() || address.port() == 0) {
+            continue;
+        }
+        auto already_present = false;
+        for (const auto &existing : normalized) {
+            if (existing.ip() == address.ip()) {
+                already_present = true;
+                break;
+            }
+        }
+        if (!already_present && normalized.size() < maximum) {
+            normalized.append(address);
+        }
+    }
+    addresses = std::move(normalized);
+}
+
 bool address_lists_match(
     const QList<shared::v1::PeerAddress> &left,
     const QList<shared::v1::PeerAddress> &right)
@@ -100,31 +168,21 @@ void address_hint_repository::merge_addresses(
     changed = false;
     auto all_addresses = read_file();
     auto peer_addresses = all_addresses.value(peer_id);
+    const auto original_addresses = peer_addresses;
 
-    for (const auto &address : addresses) {
+    // Hints are serialized newest-first. Process them backwards because each
+    // accepted endpoint is moved to the LRU front.
+    for (auto it = addresses.crbegin(); it != addresses.crend(); ++it) {
+        const auto &address = *it;
         if (address.ip().isEmpty() || address.port() == 0) {
             continue;
         }
 
-        auto updated_existing = false;
-        for (auto &existing : peer_addresses) {
-            if (!addresses_match(existing, address)) {
-                continue;
-            }
-
-            if (address.observedTimeMs() > existing.observedTimeMs()) {
-                existing.setObservedTimeMs(address.observedTimeMs());
-                changed = true;
-            }
-            updated_existing = true;
-            break;
-        }
-
-        if (!updated_existing) {
-            peer_addresses.append(address);
-            changed = true;
-        }
+        touch_lru_address(peer_addresses, address);
     }
+
+    trim_lru_addresses(peer_addresses, 5);
+    changed = !address_lists_match(original_addresses, peer_addresses);
 
     if (!changed) {
         return;
@@ -174,6 +232,8 @@ void address_hint_repository::replace_source_addresses(
         }
     }
 
+    trim_lru_addresses(updated_addresses, 5);
+
     if (address_lists_match(peer_addresses, updated_addresses)) {
         return;
     }
@@ -185,6 +245,20 @@ void address_hint_repository::replace_source_addresses(
     }
     changed = true;
     write_file(all_addresses);
+}
+
+void address_hint_repository::cap_addresses_per_peer(qsizetype maximum, bool &changed) const
+{
+    changed = false;
+    auto all_addresses = read_file();
+    for (auto it = all_addresses.begin(); it != all_addresses.end(); ++it) {
+        const auto previous = it.value();
+        trim_lru_addresses(it.value(), maximum);
+        changed = changed || !address_lists_match(previous, it.value());
+    }
+    if (changed) {
+        write_file(all_addresses);
+    }
 }
 
 QHash<QString, QList<shared::v1::PeerAddress>> address_hint_repository::read_file() const

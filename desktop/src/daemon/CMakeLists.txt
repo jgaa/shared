@@ -12,6 +12,7 @@ target_include_directories(sharedservice PUBLIC
 )
 
 target_link_libraries(sharedservice PUBLIC
+    Qt6::Concurrent
     Qt6::Core
     Qt6::Network
     sharedcore
