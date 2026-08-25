@@ -2080,6 +2080,18 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
         return;
     }
 
+    // The operations below may discover more peers and initiate connections.
+    // That adds entries to sessions_, invalidating QHash iterators, so retain
+    // everything needed from this session before making those calls.
+    session_it = sessions_.find(socket);
+    if (session_it == sessions_.end() || session_it->closing) {
+        return;
+    }
+    const auto outbound = session_it->outbound;
+    const auto target_peer_id = session_it->target_peer_id;
+    auto pending_pre_auth_messages = std::move(session_it->pending_pre_auth_messages);
+    session_it->pending_pre_auth_messages.clear();
+
     merge_observed_address(
         remote_peer_id,
         socket_address(*socket),
@@ -2088,10 +2100,13 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
         socket);
     merge_claimed_addresses(remote_peer_id, peer_info.knownAddresses(), socket);
 
-    if (session_it->outbound) {
-        pending_connections_.remove(session_it->target_peer_id);
-        reset_outbound_connection_backoff(session_it->target_peer_id);
-        session_it->outbound_failure_recorded = false;
+    if (outbound) {
+        pending_connections_.remove(target_peer_id);
+        reset_outbound_connection_backoff(target_peer_id);
+        if (const auto refreshed_session_it = sessions_.find(socket);
+            refreshed_session_it != sessions_.end()) {
+            refreshed_session_it->outbound_failure_recorded = false;
+        }
     }
 
     write_peer_status_snapshot();
@@ -2105,8 +2120,6 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
         send_current_peer_list(socket);
     }
 
-    const auto pending_pre_auth_messages = session_it->pending_pre_auth_messages;
-    session_it->pending_pre_auth_messages.clear();
     for (const auto &pending_envelope : pending_pre_auth_messages) {
         process_authenticated_envelope(socket, pending_envelope);
     }
@@ -3925,23 +3938,39 @@ bool peer_service::prune_duplicate_sessions(QSslSocket *socket)
     }
 
     const auto remote_peer_id = candidate_it->remote_peer_id;
+    auto *winning_socket = socket;
+    auto winning_session = candidate_it.value();
+    QList<QSslSocket *> duplicate_sockets{};
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
         if (it.key() == socket || it.value().remote_peer_id != remote_peer_id || !it.value().authenticated) {
             continue;
         }
 
-        if (should_keep_session(it.value(), candidate_it.value(), remote_peer_id)) {
-            qCInfo(shared_peer_service_log) << "dropping duplicate peer session in favor of new connection" << remote_peer_id;
-            close_socket(it.key(), QStringLiteral("Duplicate session lost ownership"));
-            continue;
+        duplicate_sockets.append(it.key());
+        if (!should_keep_session(it.value(), winning_session, remote_peer_id)) {
+            winning_socket = it.key();
+            winning_session = it.value();
         }
-
-        qCInfo(shared_peer_service_log) << "dropping duplicate peer session in favor of existing connection" << remote_peer_id;
-        close_socket(socket, QStringLiteral("Duplicate session lost ownership"));
-        return false;
     }
 
-    return true;
+    if (winning_socket == socket) {
+        for (auto *duplicate_socket : duplicate_sockets) {
+            qCInfo(shared_peer_service_log) << "dropping duplicate peer session in favor of new connection" << remote_peer_id;
+            close_socket(duplicate_socket, QStringLiteral("Duplicate session lost ownership"));
+        }
+        return true;
+    }
+
+    for (auto *duplicate_socket : duplicate_sockets) {
+        if (duplicate_socket == winning_socket) {
+            continue;
+        }
+        qCInfo(shared_peer_service_log) << "dropping duplicate peer session in favor of existing connection" << remote_peer_id;
+        close_socket(duplicate_socket, QStringLiteral("Duplicate session lost ownership"));
+    }
+    qCInfo(shared_peer_service_log) << "dropping duplicate peer session in favor of existing connection" << remote_peer_id;
+    close_socket(socket, QStringLiteral("Duplicate session lost ownership"));
+    return false;
 }
 
 void peer_service::merge_observed_address(
