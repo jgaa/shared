@@ -124,6 +124,15 @@ Current desktop transfer shapes:
 * clipboard: one encrypted chunk
 * file: one or more encrypted chunks
 
+Desktop file senders must not pre-encrypt a complete file or create a
+temporary ciphertext copy. They may make a bounded-memory plaintext pre-scan
+to calculate the size and SHA-256 required by `TransferMetadata`. Once the
+recipient accepts the offer, the sender reopens the source file, reads at most
+`metadata.chunk_size` plaintext bytes at a time, encrypts that chunk, and
+sends the resulting `TransferChunk` before reading the next chunk. This is an
+implementation requirement only; the `TransferOffer` and `TransferChunk` wire
+formats remain unchanged.
+
 ## Recipient Key Wrapping
 
 Current desktop file-transfer key wrapping works as follows:

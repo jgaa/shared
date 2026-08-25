@@ -7,6 +7,7 @@
 #include <QCoroFuture>
 #include <QCoroSignal>
 
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
 #include <QtCore/QElapsedTimer>
@@ -40,6 +41,7 @@ namespace {
 
 constexpr quint32 protocol_version{1};
 constexpr quint32 transfer_chunk_size{4 * 1024 * 1024};
+constexpr qint64 file_hash_read_size{1024 * 1024};
 constexpr qsizetype socket_backlog_limit_bytes{2 * 1024 * 1024};
 constexpr qsizetype transfer_queue_limit_bytes{3 * static_cast<qsizetype>(transfer_chunk_size)};
 constexpr auto keepalive_interval_ms{15000};
@@ -59,6 +61,26 @@ struct encrypted_chunk_result {
     core::transfer_crypto::encrypted_payload payload{};
     QString error{};
 };
+
+bool sha256_file(QFile &file, QByteArray &digest, quint64 &size, QString &error_message)
+{
+    QCryptographicHash hash{QCryptographicHash::Sha256};
+    size = 0;
+    while (true) {
+        const auto bytes = file.read(file_hash_read_size);
+        if (bytes.isEmpty()) {
+            if (file.atEnd()) {
+                digest = hash.result().toHex();
+                return true;
+            }
+
+            error_message = file.errorString();
+            return false;
+        }
+        hash.addData(bytes);
+        size += static_cast<quint64>(bytes.size());
+    }
+}
 
 QString build_numbered_filename(const QString &base_name, const QString &suffix, int index)
 {
@@ -598,9 +620,14 @@ bool peer_service::send_files(
                 continue;
             }
 
-            const auto plaintext = file.readAll();
-            if (plaintext.size() != file.size()) {
-                qCWarning(shared_peer_service_log) << "Failed to read complete file for transfer" << file_path << file.errorString();
+            QByteArray plaintext_sha256{};
+            quint64 plaintext_size{};
+            QString hash_error{};
+            if (!sha256_file(file, plaintext_sha256, plaintext_size, hash_error)) {
+                qCWarning(shared_peer_service_log)
+                    << "Failed to hash file for transfer"
+                    << file_path
+                    << hash_error;
                 continue;
             }
 
@@ -642,11 +669,11 @@ bool peer_service::send_files(
             shared::v1::TransferMetadata metadata{};
             metadata.setFilename(file_info.fileName());
             metadata.setMimeType(mime_database.mimeTypeForFile(file_info).name());
-            metadata.setSize(static_cast<quint64>(file_info.size()));
-            metadata.setSha256(QString::fromLatin1(core::transfer_crypto::sha256_hex(plaintext)));
+            metadata.setSize(plaintext_size);
+            metadata.setSha256(QString::fromLatin1(plaintext_sha256));
             metadata.setChunkSize(transfer_chunk_size);
             metadata.setChunkCount(
-                static_cast<quint64>((file_info.size() + transfer_chunk_size - 1) / transfer_chunk_size));
+                (plaintext_size + transfer_chunk_size - 1) / transfer_chunk_size);
 
             shared::v1::TransferOffer offer{};
             offer.setTransferId(transfer_id_message);
