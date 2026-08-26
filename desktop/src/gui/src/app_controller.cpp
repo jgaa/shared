@@ -44,7 +44,13 @@ namespace shared::desktop::gui {
 
 Q_LOGGING_CATEGORY(shared_gui_app_controller_log, "shared.desktop.gui.app_controller")
 
-#if SHARED_FLATPAK_BUILD
+namespace {
+
+constexpr qint64 maximum_file_transfer_size{10LL * 1024 * 1024 * 1024};
+constexpr qint64 maximum_runtime_status_file_size{1024 * 1024};
+
+}
+
 class portal_response_waiter final : public QObject {
     Q_OBJECT
 
@@ -80,7 +86,38 @@ public slots:
         loop->quit();
     }
 };
-#endif
+
+struct file_chooser_portal_result {
+    bool requested{false};
+    bool accepted{false};
+    QStringList uris{};
+    QString error_message{};
+};
+
+class file_chooser_portal_waiter final : public QObject {
+    Q_OBJECT
+
+public:
+    file_chooser_portal_result *result{nullptr};
+    QEventLoop *loop{nullptr};
+
+public slots:
+    void handle_response(uint response, const QVariantMap &payload)
+    {
+        if (result == nullptr || loop == nullptr) {
+            return;
+        }
+
+        result->requested = true;
+        result->accepted = response == 0;
+        if (result->accepted) {
+            result->uris = payload.value(QStringLiteral("uris")).toStringList();
+        } else if (response != 1) {
+            result->error_message = QStringLiteral("File chooser portal request failed");
+        }
+        loop->quit();
+    }
+};
 
 verified_peers_model::verified_peers_model(QObject *parent)
     : QAbstractListModel{parent}
@@ -304,6 +341,10 @@ runtime_snapshot load_runtime_snapshot(const QString &status_file_path)
         return snapshot;
     }
 
+    if (status_file.size() > maximum_runtime_status_file_size) {
+        qCWarning(shared_gui_app_controller_log) << "Ignoring oversized peer status snapshot" << status_file.fileName();
+        return snapshot;
+    }
     const auto document = QJsonDocument::fromJson(status_file.readAll());
     if (document.isArray()) {
         for (const auto &value : document.array()) {
@@ -692,6 +733,64 @@ portal_response_waiter::result_state request_flatpak_background_autostart(bool e
     return result;
 }
 #endif
+
+file_chooser_portal_result select_files_with_portal()
+{
+    file_chooser_portal_result result{};
+    QDBusInterface file_chooser_portal{
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        QStringLiteral("/org/freedesktop/portal/desktop"),
+        QStringLiteral("org.freedesktop.portal.FileChooser"),
+        QDBusConnection::sessionBus()};
+    if (!file_chooser_portal.isValid()) {
+        return result;
+    }
+
+    QVariantMap options{};
+    options.insert(
+        QStringLiteral("handle_token"),
+        QStringLiteral("shared_%1").arg(QString::number(QRandomGenerator::global()->generate64(), 16)));
+    options.insert(QStringLiteral("multiple"), true);
+
+    const auto request_message = file_chooser_portal.call(
+        QStringLiteral("OpenFile"),
+        QStringLiteral(""),
+        QStringLiteral("Select Files to Send"),
+        options);
+    if (request_message.type() == QDBusMessage::ErrorMessage) {
+        result.error_message = request_message.errorMessage();
+        return result;
+    }
+
+    if (request_message.arguments().isEmpty()
+        || !request_message.arguments().constFirst().canConvert<QDBusObjectPath>()) {
+        result.error_message = QStringLiteral("File chooser portal returned an invalid request handle");
+        return result;
+    }
+
+    const auto request_path = request_message.arguments().constFirst().value<QDBusObjectPath>().path();
+    QEventLoop loop{};
+    file_chooser_portal_waiter waiter{};
+    waiter.result = &result;
+    waiter.loop = &loop;
+    const auto connected = QDBusConnection::sessionBus().connect(
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        request_path,
+        QStringLiteral("org.freedesktop.portal.Request"),
+        QStringLiteral("Response"),
+        &waiter,
+        SLOT(handle_response(uint,QVariantMap)));
+    if (!connected) {
+        result.error_message = QStringLiteral("Failed to subscribe to file chooser portal response");
+        return result;
+    }
+
+    loop.exec();
+    if (!result.requested) {
+        result.error_message = QStringLiteral("File chooser portal request did not complete");
+    }
+    return result;
+}
 
 }
 
@@ -1700,21 +1799,40 @@ bool app_controller::send_clipboard_to_peer(const QString &peer_id)
 
 QStringList app_controller::select_files()
 {
-    QFileDialog dialog{};
-    dialog.setFileMode(QFileDialog::ExistingFiles);
-    dialog.setOption(QFileDialog::DontUseNativeDialog, false);
-    dialog.setDirectory(download_path());
-    dialog.setWindowTitle(QStringLiteral("Select Files to Send"));
-    if (dialog.exec() != QDialog::Accepted) {
+    const auto portal_result = select_files_with_portal();
+    if (portal_result.requested) {
+        if (!portal_result.accepted) {
+            if (!portal_result.error_message.isEmpty()) {
+                set_last_error(portal_result.error_message);
+            }
+            return {};
+        }
+        return normalize_selected_file_inputs(portal_result.uris);
+    }
+    if (!portal_result.error_message.isEmpty()) {
+        qCWarning(shared_gui_app_controller_log)
+            << "Native file chooser portal unavailable; falling back to QFileDialog"
+            << portal_result.error_message;
+    }
+
+    const auto selected = QFileDialog::getOpenFileUrls(
+        nullptr,
+        QStringLiteral("Select Files to Send"),
+        QUrl::fromLocalFile(download_path()),
+        QString{},
+        nullptr,
+        QFileDialog::Options{});
+    if (selected.isEmpty()) {
         return {};
     }
 
-    QStringList selected{};
-    for (const auto &url : dialog.selectedUrls()) {
-        selected.append(url.toString());
+    QStringList selected_urls{};
+    selected_urls.reserve(selected.size());
+    for (const auto &url : selected) {
+        selected_urls.append(url.toString());
     }
 
-    return normalize_selected_file_inputs(selected);
+    return normalize_selected_file_inputs(selected_urls);
 }
 
 QStringList app_controller::stage_dropped_files(const QStringList &file_paths)
@@ -2055,6 +2173,10 @@ QStringList app_controller::stage_files_for_transfer(const QStringList &file_inp
 #else
             error_message = QStringLiteral("Selected file is no longer available: %1").arg(source_path);
 #endif
+            return {};
+        }
+        if (source_info.size() < 0 || source_info.size() > maximum_file_transfer_size) {
+            error_message = QStringLiteral("Selected file exceeds the 10 GiB transfer limit: %1").arg(source_path);
             return {};
         }
 

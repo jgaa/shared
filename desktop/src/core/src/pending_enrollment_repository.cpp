@@ -15,6 +15,10 @@ Q_LOGGING_CATEGORY(shared_pending_enrollment_log, "shared.desktop.core.pending_e
 
 namespace {
 
+constexpr qint64 maximum_enrollment_request_file_size{256 * 1024};
+constexpr qint64 maximum_enrollment_decision_file_size{16 * 1024};
+constexpr qsizetype maximum_pending_enrollment_requests{64};
+
 [[noreturn]] void throw_io_error(const QString &message)
 {
     qCCritical(shared_pending_enrollment_log) << message;
@@ -47,6 +51,16 @@ pending_enrollment_request from_json(const QJsonObject &object)
     };
 }
 
+bool is_reasonably_sized_request(const pending_enrollment_request &request)
+{
+    return request.request_id.size() <= 64
+        && request.peer_id.size() <= 64
+        && request.name.size() <= 256
+        && request.verification_code.size() == 8
+        && request.certificate_request.size() <= 128 * 1024
+        && request.x25519_public_key.size() == 32;
+}
+
 }
 
 pending_enrollment_repository::pending_enrollment_repository(const app_paths &app_paths)
@@ -76,9 +90,9 @@ QList<pending_enrollment_request> pending_enrollment_repository::load_requests()
     QDir directory{app_paths_.pending_enrollments_dir()};
 
     const auto files = directory.entryList({QStringLiteral("*.request.json")}, QDir::Files, QDir::Name);
-    for (const auto &file_name : files) {
+    for (const auto &file_name : files.mid(0, maximum_pending_enrollment_requests)) {
         QFile file{directory.filePath(file_name)};
-        if (!file.open(QIODevice::ReadOnly)) {
+        if (!file.open(QIODevice::ReadOnly) || file.size() > maximum_enrollment_request_file_size) {
             continue;
         }
 
@@ -87,7 +101,10 @@ QList<pending_enrollment_request> pending_enrollment_repository::load_requests()
             continue;
         }
 
-        requests.append(from_json(document.object()));
+        const auto request = from_json(document.object());
+        if (is_reasonably_sized_request(request)) {
+            requests.append(request);
+        }
     }
 
     return requests;
@@ -96,7 +113,7 @@ QList<pending_enrollment_request> pending_enrollment_repository::load_requests()
 std::optional<pending_enrollment_request> pending_enrollment_repository::load_request(const QString &request_id) const
 {
     QFile file{request_path(request_id)};
-    if (!file.open(QIODevice::ReadOnly)) {
+    if (!file.open(QIODevice::ReadOnly) || file.size() > maximum_enrollment_request_file_size) {
         return std::nullopt;
     }
 
@@ -105,7 +122,8 @@ std::optional<pending_enrollment_request> pending_enrollment_repository::load_re
         return std::nullopt;
     }
 
-    return from_json(document.object());
+    const auto request = from_json(document.object());
+    return is_reasonably_sized_request(request) ? std::optional{request} : std::nullopt;
 }
 
 void pending_enrollment_repository::save_decision(
@@ -136,7 +154,7 @@ void pending_enrollment_repository::save_decision(
 std::optional<pending_enrollment_decision> pending_enrollment_repository::load_decision(const QString &request_id) const
 {
     QFile file{decision_path(request_id)};
-    if (!file.open(QIODevice::ReadOnly)) {
+    if (!file.open(QIODevice::ReadOnly) || file.size() > maximum_enrollment_decision_file_size) {
         return std::nullopt;
     }
 
@@ -145,10 +163,14 @@ std::optional<pending_enrollment_decision> pending_enrollment_repository::load_d
         return std::nullopt;
     }
 
+    const auto message = document.object().value(QStringLiteral("message")).toString();
+    if (message.size() > 4096) {
+        return std::nullopt;
+    }
     return pending_enrollment_decision{
         .decided = document.object().value(QStringLiteral("decided")).toBool(),
         .approved = document.object().value(QStringLiteral("approved")).toBool(),
-        .message = document.object().value(QStringLiteral("message")).toString(),
+        .message = message,
     };
 }
 

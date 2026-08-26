@@ -12,12 +12,14 @@
 #include "shared.qpb.h"
 
 #include <QtCore/QDir>
+#include <QtCore/QDataStream>
 #include <QtCore/QFile>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QTemporaryDir>
 #include <QtTest/QTest>
 
 #include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -108,6 +110,7 @@ class sharedcore_tests final : public QObject {
 
 private slots:
     void envelope_io_round_trip();
+    void envelope_io_rejects_oversized_payload();
     void configuration_repository_round_trip();
     void pending_enrollment_repository_round_trip();
     void address_hint_repository_round_trip();
@@ -177,6 +180,20 @@ void sharedcore_tests::envelope_io_round_trip()
     QVERIFY(decoded_who_has.hasRequestId());
     QCOMPARE(decoded_who_has.requestId(), static_cast<quint32>(7));
     QCOMPARE(decoded_who_has.whoHas().destinationPeerId().uuid(), destination_peer_id.uuid());
+}
+
+void sharedcore_tests::envelope_io_rejects_oversized_payload()
+{
+    QByteArray framed_message{};
+    QDataStream stream{&framed_message, QIODeviceBase::WriteOnly};
+    stream.setByteOrder(QDataStream::BigEndian);
+    stream << std::numeric_limits<quint32>::max();
+
+    shared::v1::Envelope envelope{};
+    QString error_message{};
+    QVERIFY(!shared::desktop::core::envelope_io::try_read_message(framed_message, envelope, error_message));
+    QCOMPARE(error_message, QStringLiteral("Envelope payload exceeds the maximum allowed size"));
+    QCOMPARE(framed_message.size(), 4);
 }
 
 void sharedcore_tests::configuration_repository_round_trip()

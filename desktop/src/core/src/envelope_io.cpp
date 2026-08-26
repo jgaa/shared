@@ -25,7 +25,8 @@ QByteArray envelope_io::serialize(const shared::v1::Envelope &envelope)
 bool envelope_io::try_read_message(
     QByteArray &buffer,
     shared::v1::Envelope &envelope,
-    QString &error_message)
+    QString &error_message,
+    quint32 maximum_payload)
 {
     if (buffer.size() < 4) {
         return false;
@@ -37,12 +38,18 @@ bool envelope_io::try_read_message(
     quint32 payload_size{};
     stream >> payload_size;
 
-    if (buffer.size() < static_cast<int>(payload_size + 4)) {
+    if (payload_size > maximum_payload) {
+        error_message = QStringLiteral("Envelope payload exceeds the maximum allowed size");
         return false;
     }
 
-    const auto payload = buffer.sliced(4, payload_size);
-    buffer.remove(0, static_cast<int>(payload_size + 4));
+    const auto framed_size = static_cast<qsizetype>(payload_size) + 4;
+    if (buffer.size() < framed_size) {
+        return false;
+    }
+
+    const auto payload = buffer.sliced(4, static_cast<qsizetype>(payload_size));
+    buffer.remove(0, framed_size);
 
     QProtobufSerializer serializer{};
     if (!envelope.deserialize(&serializer, payload)) {

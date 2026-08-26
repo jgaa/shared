@@ -15,6 +15,10 @@ Q_LOGGING_CATEGORY(shared_address_hint_repository_log, "shared.desktop.core.addr
 
 namespace {
 
+constexpr qint64 maximum_address_hints_file_size{1024 * 1024};
+constexpr qsizetype maximum_address_hint_peers{256};
+constexpr qsizetype maximum_addresses_per_peer{16};
+
 [[noreturn]] void throw_address_hint_error(const QString &message)
 {
     qCCritical(shared_address_hint_repository_log) << message;
@@ -272,6 +276,9 @@ QHash<QString, QList<shared::v1::PeerAddress>> address_hint_repository::read_fil
         throw_address_hint_error(
             QStringLiteral("Failed to open address-hints file for read: %1").arg(file.fileName()));
     }
+    if (file.size() > maximum_address_hints_file_size) {
+        throw_address_hint_error(QStringLiteral("Address-hints file exceeds the maximum allowed size"));
+    }
 
     const auto document = QJsonDocument::fromJson(file.readAll());
     if (!document.isObject()) {
@@ -280,9 +287,14 @@ QHash<QString, QList<shared::v1::PeerAddress>> address_hint_repository::read_fil
 
     QHash<QString, QList<shared::v1::PeerAddress>> result{};
     const auto root = document.object();
-    for (auto it = root.begin(); it != root.end(); ++it) {
+    auto it = root.begin();
+    for (qsizetype peer_count{}; it != root.end() && peer_count < maximum_address_hint_peers; ++it, ++peer_count) {
         QList<shared::v1::PeerAddress> addresses{};
-        for (const auto &value : it->toArray()) {
+        const auto stored_addresses = it->toArray();
+        for (qsizetype address_index{};
+             address_index < stored_addresses.size() && address_index < maximum_addresses_per_peer;
+             ++address_index) {
+            const auto &value = stored_addresses.at(address_index);
             if (!value.isObject()) {
                 continue;
             }

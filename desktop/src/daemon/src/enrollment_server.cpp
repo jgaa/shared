@@ -15,6 +15,13 @@ Q_LOGGING_CATEGORY(shared_enrollment_server_log, "shared.desktop.daemon.enrollme
 
 namespace {
 
+// Enrollment only carries a small CSR and key material; accepting normal peer
+// frame sizes here would let unauthenticated clients retain needlessly large data.
+constexpr quint32 maximum_enrollment_payload_size{256 * 1024};
+constexpr qsizetype maximum_enrollment_sessions{16};
+constexpr qsizetype maximum_enrollment_csr_size{128 * 1024};
+constexpr qsizetype maximum_enrollment_name_length{256};
+
 shared::v1::Envelope make_decision_envelope(const shared::v1::EnrollmentDecision &decision)
 {
     shared::v1::Envelope envelope{};
@@ -120,6 +127,7 @@ bool enrollment_server::start(QString &error_message)
         QSsl::PrivateKey));
     ssl_configuration.setPeerVerifyMode(QSslSocket::VerifyNone);
     server_.setSslConfiguration(ssl_configuration);
+    server_.setMaxPendingConnections(static_cast<int>(maximum_enrollment_sessions));
 
     connect(&server_, &QSslServer::pendingConnectionAvailable, this, &enrollment_server::handle_pending_connection);
 
@@ -160,12 +168,19 @@ void enrollment_server::handle_pending_connection()
             qCWarning(shared_enrollment_server_log) << "Ignoring non-SSL pending connection";
             continue;
         }
+        if (sessions_.size() >= maximum_enrollment_sessions) {
+            qCWarning(shared_enrollment_server_log) << "Rejecting enrollment connection: session limit reached";
+            socket->abort();
+            socket->deleteLater();
+            continue;
+        }
 
         qCInfo(shared_enrollment_server_log)
             << "Accepted incoming enrollment connection"
             << socket->peerAddress().toString()
             << socket->peerPort();
 
+        socket->setReadBufferSize(static_cast<qsizetype>(maximum_enrollment_payload_size) + 4);
         sessions_.insert(socket, {});
 
         connect(socket, &QSslSocket::readyRead, this, [this, socket]() {
@@ -200,7 +215,14 @@ void enrollment_server::handle_socket_ready_read(QSslSocket *socket)
         return;
     }
 
-    session->buffer.append(socket->readAll());
+    const auto received = socket->readAll();
+    const auto maximum_frame_size = static_cast<qsizetype>(maximum_enrollment_payload_size) + 4;
+    if (received.size() > maximum_frame_size - session->buffer.size()) {
+        qCWarning(shared_enrollment_server_log) << "Enrollment client exceeded the maximum buffered frame size";
+        socket->abort();
+        return;
+    }
+    session->buffer.append(received);
     qCInfo(shared_enrollment_server_log)
         << "Received enrollment bytes"
         << socket->peerAddress().toString()
@@ -209,7 +231,8 @@ void enrollment_server::handle_socket_ready_read(QSslSocket *socket)
 
     shared::v1::Envelope envelope{};
     QString error_message{};
-    if (!core::envelope_io::try_read_message(session->buffer, envelope, error_message)) {
+    if (!core::envelope_io::try_read_message(
+            session->buffer, envelope, error_message, maximum_enrollment_payload_size)) {
         if (!error_message.isEmpty()) {
             qCWarning(shared_enrollment_server_log) << "Invalid enrollment envelope:" << error_message;
             write_decision_and_disconnect(socket, make_error_decision(QStringLiteral("Invalid enrollment envelope")));
@@ -227,8 +250,11 @@ void enrollment_server::handle_socket_ready_read(QSslSocket *socket)
         const auto &request_message = envelope.enrollmentRequest();
         if (!request_message.hasRequestedIdentity()
             || request_message.requestedIdentity().peerId().uuid().isEmpty()
+            || request_message.requestedIdentity().peerId().uuid().size() > 64
             || request_message.requestedIdentity().name().trimmed().isEmpty()
+            || request_message.requestedIdentity().name().size() > maximum_enrollment_name_length
             || request_message.certificateRequest().isEmpty()
+            || request_message.certificateRequest().size() > maximum_enrollment_csr_size
             || request_message.x25519PublicKey().size() != 32
             || request_message.verificationCode().size() != 8) {
             const auto message = QStringLiteral("Enrollment request is missing required fields or has invalid sizes");

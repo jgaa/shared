@@ -19,6 +19,8 @@ Q_LOGGING_CATEGORY(shared_enrollment_client_log, "shared.desktop.core.enrollment
 
 namespace {
 
+constexpr quint32 maximum_enrollment_payload_size{256 * 1024};
+
 QString certificate_fingerprint(const QSslCertificate &certificate)
 {
     return QString::fromLatin1(certificate.digest(QCryptographicHash::Sha256).toHex()).toLower();
@@ -88,6 +90,7 @@ enrollment_client::result enrollment_client::enroll_prepared(
         << "verification_code=" << prepared.verification_code;
 
     QSslSocket socket{};
+    socket.setReadBufferSize(static_cast<qsizetype>(maximum_enrollment_payload_size) + 4);
     socket.setPeerVerifyMode(QSslSocket::VerifyNone);
     QObject::connect(&socket, &QSslSocket::connected, [&socket]() {
         qCInfo(shared_enrollment_client_log)
@@ -180,12 +183,17 @@ enrollment_client::result enrollment_client::enroll_prepared(
             continue;
         }
 
-        buffer.append(socket.readAll());
+        const auto received = socket.readAll();
+        const auto maximum_frame_size = static_cast<qsizetype>(maximum_enrollment_payload_size) + 4;
+        if (received.size() > maximum_frame_size - buffer.size()) {
+            return fail_enrollment(QStringLiteral("Enrollment response exceeds the maximum frame size"));
+        }
+        buffer.append(received);
         qCInfo(shared_enrollment_client_log) << "Received enrollment response bytes" << buffer.size();
 
         shared::v1::Envelope response{};
         QString error_message{};
-        if (!envelope_io::try_read_message(buffer, response, error_message)) {
+        if (!envelope_io::try_read_message(buffer, response, error_message, maximum_enrollment_payload_size)) {
             if (!error_message.isEmpty()) {
                 return fail_enrollment(
                     QStringLiteral("Failed to decode enrollment response"),

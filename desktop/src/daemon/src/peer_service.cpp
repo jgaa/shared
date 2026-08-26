@@ -41,9 +41,16 @@ namespace {
 
 constexpr quint32 protocol_version{1};
 constexpr quint32 transfer_chunk_size{4 * 1024 * 1024};
+constexpr quint64 maximum_file_transfer_size{10ULL * 1024 * 1024 * 1024};
 constexpr qint64 file_hash_read_size{1024 * 1024};
 constexpr qsizetype socket_backlog_limit_bytes{2 * 1024 * 1024};
 constexpr qsizetype transfer_queue_limit_bytes{3 * static_cast<qsizetype>(transfer_chunk_size)};
+constexpr qsizetype maximum_peer_sessions{64};
+constexpr qsizetype maximum_pending_incoming_transfers{32};
+constexpr qsizetype maximum_filename_bytes{255};
+constexpr qsizetype maximum_advertised_reachable_peers{256};
+constexpr qsizetype maximum_advertised_topology_links{512};
+constexpr qsizetype maximum_peer_id_length{64};
 constexpr auto keepalive_interval_ms{15000};
 constexpr auto address_hint_republish_interval_ms{30000};
 constexpr auto peer_status_snapshot_coalesce_ms{1000};
@@ -613,6 +620,13 @@ bool peer_service::send_files(
                 qCWarning(shared_peer_service_log) << "Skipping invalid file path" << file_path;
                 continue;
             }
+            if (file_info.size() < 0 || static_cast<quint64>(file_info.size()) > maximum_file_transfer_size) {
+                qCWarning(shared_peer_service_log)
+                    << "Skipping file larger than the transfer limit"
+                    << file_path
+                    << "limit=" << maximum_file_transfer_size;
+                continue;
+            }
 
             QFile file{file_path};
             if (!file.open(QIODevice::ReadOnly)) {
@@ -986,6 +1000,12 @@ void peer_service::handle_pending_connection()
             qCWarning(shared_peer_service_log) << "Ignoring non-SSL peer connection";
             continue;
         }
+        if (sessions_.size() >= maximum_peer_sessions) {
+            qCWarning(shared_peer_service_log) << "Rejecting peer connection: session limit reached";
+            socket->abort();
+            socket->deleteLater();
+            continue;
+        }
 
         qCInfo(shared_peer_service_log)
             << "accepted peer connection"
@@ -1179,6 +1199,7 @@ bool peer_service::configure_server(QString &error_message)
     ssl_configuration.setCaCertificates(ca_certificates);
     ssl_configuration.setPeerVerifyMode(QSslSocket::VerifyPeer);
     server_.setSslConfiguration(ssl_configuration);
+    server_.setMaxPendingConnections(static_cast<int>(maximum_peer_sessions));
 
     connect(&server_, &QSslServer::pendingConnectionAvailable, this, &peer_service::handle_pending_connection);
     QHostAddress listen_address{};
@@ -1279,6 +1300,7 @@ quint32 peer_service::next_request_id()
 
 void peer_service::attach_socket(QSslSocket *socket, bool outbound)
 {
+    socket->setReadBufferSize(core::envelope_io::maximum_frame_size);
     session_state session{};
     session.outbound = outbound;
     session.local_connection_id = next_connection_id();
@@ -1796,7 +1818,12 @@ void peer_service::handle_socket_ready_read(QSslSocket *socket)
         return;
     }
 
-    session_it->buffer.append(socket->readAll());
+    const auto received = socket->readAll();
+    if (received.size() > core::envelope_io::maximum_frame_size - session_it->buffer.size()) {
+        close_socket(socket, QStringLiteral("Peer exceeded the maximum buffered frame size"));
+        return;
+    }
+    session_it->buffer.append(received);
 
     while (!session_it->buffer.isEmpty()) {
         shared::v1::Envelope envelope{};
@@ -2150,7 +2177,8 @@ void peer_service::handle_peer_list(QSslSocket *socket, const shared::v1::PeerLi
 
 void peer_service::handle_address_hint(QSslSocket *socket, const shared::v1::AddressHint &address_hint)
 {
-    if (!address_hint.hasPeerId() || address_hint.peerId().uuid().isEmpty()) {
+    if (!address_hint.hasPeerId() || address_hint.peerId().uuid().isEmpty()
+        || address_hint.peerId().uuid().size() > maximum_peer_id_length) {
         qCWarning(shared_peer_service_log) << "Ignoring address hint without peer id";
         return;
     }
@@ -2183,7 +2211,9 @@ void peer_service::handle_reachability_advertisement(
     }
 
     if (!advertisement.hasAdvertiserPeerId()
-        || advertisement.advertiserPeerId().uuid().trimmed().isEmpty()) {
+        || advertisement.advertiserPeerId().uuid().trimmed().isEmpty()
+        || advertisement.advertiserPeerId().uuid().size() > maximum_peer_id_length
+        || advertisement.directlyReachablePeerIds().size() > maximum_advertised_reachable_peers) {
         qCWarning(shared_peer_service_log) << "Ignoring reachability advertisement without advertiser id";
         return;
     }
@@ -2207,6 +2237,7 @@ void peer_service::handle_reachability_advertisement(
     for (const auto &reachable_peer_id : advertisement.directlyReachablePeerIds()) {
         const auto target_peer_id = reachable_peer_id.uuid().trimmed();
         if (target_peer_id.isEmpty()
+            || target_peer_id.size() > maximum_peer_id_length
             || target_peer_id == advertiser_peer_id
             || target_peer_id == configuration_.peer_id) {
             continue;
@@ -2232,7 +2263,9 @@ void peer_service::handle_topology_advertisement(
     }
 
     if (!advertisement.hasAdvertiserPeerId()
-        || advertisement.advertiserPeerId().uuid().trimmed().isEmpty()) {
+        || advertisement.advertiserPeerId().uuid().trimmed().isEmpty()
+        || advertisement.advertiserPeerId().uuid().size() > maximum_peer_id_length
+        || advertisement.directLinks().size() > maximum_advertised_topology_links) {
         qCWarning(shared_peer_service_log) << "Ignoring topology advertisement without advertiser id";
         return;
     }
@@ -2261,6 +2294,10 @@ void peer_service::handle_topology_advertisement(
 
         const auto initiator_peer_id = link.initiatorPeerId().uuid().trimmed();
         const auto acceptor_peer_id = link.acceptorPeerId().uuid().trimmed();
+        if (initiator_peer_id.size() > maximum_peer_id_length
+            || acceptor_peer_id.size() > maximum_peer_id_length) {
+            continue;
+        }
         const auto edge_key = normalized_topology_edge_key(initiator_peer_id, acceptor_peer_id);
         if (edge_key.isEmpty()) {
             continue;
@@ -2506,6 +2543,25 @@ void peer_service::handle_transfer_offer(
         << "type=" << static_cast<int>(transfer_offer.transferType());
     if (sender_peer_id.isEmpty() || sender_peer_id != source_peer_id) {
         close_socket(socket, QStringLiteral("Transfer offer sender does not match routed peer"));
+        return;
+    }
+    if (transfer_id.size() > 64 || sender_peer_id.size() > 64) {
+        close_socket(socket, QStringLiteral("Transfer offer contains oversized identifiers"));
+        return;
+    }
+    if (incoming_clipboard_transfers_.contains(transfer_id) || incoming_file_transfers_.contains(transfer_id)) {
+        close_socket(socket, QStringLiteral("Duplicate incoming transfer id"));
+        return;
+    }
+    if (incoming_clipboard_transfers_.size() + incoming_file_transfers_.size()
+        >= maximum_pending_incoming_transfers) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_REJECTED,
+            QStringLiteral("Too many pending incoming transfers"));
         return;
     }
 
@@ -2872,6 +2928,34 @@ void peer_service::handle_file_transfer_offer(
         return;
     }
 
+    const auto &metadata = transfer_offer.metadata();
+    if (metadata.size() == 0
+        || metadata.size() > maximum_file_transfer_size
+        || metadata.chunkSize() != transfer_chunk_size
+        || metadata.sha256().size() != 64
+        || metadata.filename().toUtf8().size() > maximum_filename_bytes
+        || metadata.mimeType().size() > 255) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File transfer metadata exceeds protocol limits"));
+        return;
+    }
+    const auto expected_chunk_count = (metadata.size() + transfer_chunk_size - 1) / transfer_chunk_size;
+    if (metadata.chunkCount() != expected_chunk_count) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            source_peer_id,
+            relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File transfer has an invalid chunk count"));
+        return;
+    }
+
     QString filename_error{};
     if (!validate_incoming_filename(transfer_offer.metadata().filename(), filename_error)) {
         [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
@@ -3161,6 +3245,18 @@ void peer_service::handle_file_transfer_chunk(
         clear_incoming_file_transfer(transfer_id);
         return;
     }
+    if (transfer_chunk.ciphertext().size() > static_cast<qsizetype>(transfer_chunk_size)
+        || transfer_it->next_chunk_index >= transfer_it->expected_chunk_count) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            transfer_it->sender_peer_id,
+            transfer_it->relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File chunk exceeds protocol limits"));
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
 
     QString decrypt_error{};
     const auto plaintext = core::transfer_crypto::decrypt_aes_gcm(
@@ -3177,6 +3273,17 @@ void peer_service::handle_file_transfer_chunk(
             shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
             shared::v1::ErrorCodeGadget::ErrorCode::ERROR_DECRYPT_FAILED,
             decrypt_error);
+        clear_incoming_file_transfer(transfer_id);
+        return;
+    }
+    if (static_cast<quint64>(plaintext.size()) > transfer_it->expected_size - transfer_it->received_size) {
+        [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
+            transfer_it->sender_peer_id,
+            transfer_it->relay_peer_id,
+            transfer_id,
+            shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+            shared::v1::ErrorCodeGadget::ErrorCode::ERROR_PROTOCOL,
+            QStringLiteral("File chunk exceeds the announced file size"));
         clear_incoming_file_transfer(transfer_id);
         return;
     }
@@ -3228,9 +3335,12 @@ void peer_service::handle_file_transfer_chunk(
         return;
     }
 
-    const auto verified_plaintext = verify_file.readAll();
-    if (static_cast<quint64>(verified_plaintext.size()) != transfer_it->expected_size
-        || core::transfer_crypto::sha256_hex(verified_plaintext) != transfer_it->expected_sha256) {
+    QByteArray verified_sha256{};
+    quint64 verified_size{};
+    QString hash_error{};
+    if (!sha256_file(verify_file, verified_sha256, verified_size, hash_error)
+        || verified_size != transfer_it->expected_size
+        || verified_sha256 != transfer_it->expected_sha256) {
         [[maybe_unused]] const auto sent = send_transfer_status_to_peer(
             transfer_it->sender_peer_id,
             transfer_it->relay_peer_id,
@@ -3276,6 +3386,10 @@ void peer_service::maybe_connect_to_peer(
     const QList<shared::v1::PeerAddress> &addresses)
 {
     const auto peer_id = peer.identity().peerId().uuid();
+    if (sessions_.size() >= maximum_peer_sessions) {
+        qCWarning(shared_peer_service_log) << "Skipping outbound peer connection: session limit reached";
+        return;
+    }
     const auto local_addresses = core::local_peer_addresses(configuration_.peer_port);
     if (has_session_for_peer(peer_id)) {
         qCDebug(shared_peer_service_log)
