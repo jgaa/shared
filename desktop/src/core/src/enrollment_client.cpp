@@ -93,13 +93,13 @@ enrollment_client::result enrollment_client::enroll_prepared(
     socket.setReadBufferSize(static_cast<qsizetype>(maximum_enrollment_payload_size) + 4);
     socket.setPeerVerifyMode(QSslSocket::VerifyNone);
     QObject::connect(&socket, &QSslSocket::connected, [&socket]() {
-        qCInfo(shared_enrollment_client_log)
+        qCDebug(shared_enrollment_client_log)
             << "TCP connection established to trusted agent"
             << socket.peerAddress().toString()
             << socket.peerPort();
     });
     QObject::connect(&socket, &QSslSocket::encrypted, [&socket]() {
-        qCInfo(shared_enrollment_client_log)
+        qCDebug(shared_enrollment_client_log)
             << "TLS session established with trusted agent"
             << socket.peerAddress().toString()
             << socket.peerPort();
@@ -112,7 +112,7 @@ enrollment_client::result enrollment_client::enroll_prepared(
             qCWarning(shared_enrollment_client_log) << "TLS error during enrollment" << error.errorString();
         }
     });
-    qCInfo(shared_enrollment_client_log) << "Connecting to trusted agent" << host << port;
+    qCDebug(shared_enrollment_client_log) << "Connecting to trusted agent" << host << port;
     socket.connectToHostEncrypted(host, port);
 
     if (!socket.waitForEncrypted(15000)) {
@@ -178,7 +178,7 @@ enrollment_client::result enrollment_client::enroll_prepared(
                     socket.errorString());
             }
             if ((timer.elapsed() % 10000) < 1000) {
-                qCInfo(shared_enrollment_client_log) << "Still waiting for enrollment decision" << timer.elapsed() << "ms";
+                qCDebug(shared_enrollment_client_log) << "Still waiting for enrollment decision" << timer.elapsed() << "ms";
             }
             continue;
         }
@@ -189,7 +189,7 @@ enrollment_client::result enrollment_client::enroll_prepared(
             return fail_enrollment(QStringLiteral("Enrollment response exceeds the maximum frame size"));
         }
         buffer.append(received);
-        qCInfo(shared_enrollment_client_log) << "Received enrollment response bytes" << buffer.size();
+        qCDebug(shared_enrollment_client_log) << "Received enrollment response bytes" << buffer.size();
 
         shared::v1::Envelope response{};
         QString error_message{};
