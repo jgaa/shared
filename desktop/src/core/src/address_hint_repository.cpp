@@ -71,7 +71,8 @@ int address_source_priority(const QString &source)
 
 void touch_lru_address(
     QList<shared::v1::PeerAddress> &addresses,
-    const shared::v1::PeerAddress &address)
+    const shared::v1::PeerAddress &address,
+    bool refresh_existing_lru)
 {
     auto existing_index = -1;
     for (qsizetype index = 0; index < addresses.size(); ++index) {
@@ -91,6 +92,18 @@ void touch_lru_address(
         && address_source_priority(addresses.at(existing_index).source())
             < address_source_priority(address.source());
     const auto selected = use_existing ? addresses.at(existing_index) : address;
+
+    // Address hints are gossiped. Moving an already-known endpoint to the
+    // front on every received copy makes its ordering differ between peers;
+    // each peer then considers the hint "changed" and rebroadcasts it. Remote
+    // gossip therefore does not refresh an exact duplicate's LRU position.
+    if (!refresh_existing_lru
+        && existing_index >= 0
+        && addresses_match(addresses.at(existing_index), selected)
+        && addresses.at(existing_index).observedTimeMs() == selected.observedTimeMs()) {
+        return;
+    }
+
     for (qsizetype index = addresses.size(); index > 0; --index) {
         if (addresses.at(index - 1).ip() == address.ip()) {
             addresses.removeAt(index - 1);
@@ -167,7 +180,8 @@ void address_hint_repository::merge_address(
 void address_hint_repository::merge_addresses(
     const QString &peer_id,
     const QList<shared::v1::PeerAddress> &addresses,
-    bool &changed) const
+    bool &changed,
+    bool refresh_existing_lru) const
 {
     changed = false;
     auto all_addresses = read_file();
@@ -182,7 +196,7 @@ void address_hint_repository::merge_addresses(
             continue;
         }
 
-        touch_lru_address(peer_addresses, address);
+        touch_lru_address(peer_addresses, address, refresh_existing_lru);
     }
 
     trim_lru_addresses(peer_addresses, 5);

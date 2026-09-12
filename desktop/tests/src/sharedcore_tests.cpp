@@ -319,18 +319,32 @@ void sharedcore_tests::address_hint_repository_round_trip()
     repository.merge_address(QStringLiteral("peer-1"), updated, changed);
     QVERIFY(changed);
 
+    shared::v1::PeerAddress second{};
+    second.setIp(QStringLiteral("10.0.0.11"));
+    second.setPort(47124);
+    second.setSource(QStringLiteral("gossip"));
+    second.setObservedTimeMs(3000);
+    repository.merge_address(QStringLiteral("peer-1"), second, changed);
+    QVERIFY(changed);
+
+    // Receiving an older, already-known hint must not reorder the list: that
+    // would make every gossip hop appear as a new update and rebroadcast it.
+    changed = false;
+    repository.merge_addresses(QStringLiteral("peer-1"), {updated}, changed, false);
+    QVERIFY(!changed);
+
     const auto loaded = repository.load_for_peer(QStringLiteral("peer-1"));
-    QCOMPARE(loaded.size(), 1);
-    QCOMPARE(loaded.first().ip(), QStringLiteral("10.0.0.10"));
-    QCOMPARE(loaded.first().port(), static_cast<quint32>(47124));
-    QCOMPARE(loaded.first().observedTimeMs(), static_cast<quint64>(2000));
+    QCOMPARE(loaded.size(), 2);
+    QCOMPARE(loaded.at(1).ip(), QStringLiteral("10.0.0.10"));
+    QCOMPARE(loaded.at(1).port(), static_cast<quint32>(47124));
+    QCOMPARE(loaded.at(1).observedTimeMs(), static_cast<quint64>(2000));
 
     shared::desktop::core::address_hint_repository restarted_repository{app_paths};
     const auto restarted_loaded = restarted_repository.load_for_peer(QStringLiteral("peer-1"));
-    QCOMPARE(restarted_loaded.size(), 1);
-    QCOMPARE(restarted_loaded.first().ip(), QStringLiteral("10.0.0.10"));
-    QCOMPARE(restarted_loaded.first().port(), static_cast<quint32>(47124));
-    QCOMPARE(restarted_loaded.first().observedTimeMs(), static_cast<quint64>(2000));
+    QCOMPARE(restarted_loaded.size(), 2);
+    QCOMPARE(restarted_loaded.at(1).ip(), QStringLiteral("10.0.0.10"));
+    QCOMPARE(restarted_loaded.at(1).port(), static_cast<quint32>(47124));
+    QCOMPARE(restarted_loaded.at(1).observedTimeMs(), static_cast<quint64>(2000));
 
     shared::v1::PeerAddress manual{};
     manual.setIp(QStringLiteral("198.51.100.10"));
@@ -362,11 +376,11 @@ void sharedcore_tests::address_hint_repository_round_trip()
     QVERIFY(changed);
 
     const auto with_local = repository.load_for_peer(QStringLiteral("peer-1"));
-    QCOMPARE(with_local.size(), 3);
+    QCOMPARE(with_local.size(), 4);
     QCOMPARE(with_local.at(0).ip(), QStringLiteral("198.51.100.10"));
-    QCOMPARE(with_local.at(1).ip(), QStringLiteral("10.0.0.10"));
-    QCOMPARE(with_local.at(2).ip(), QStringLiteral("10.0.0.20"));
-    QCOMPARE(with_local.at(2).source(), QStringLiteral("local"));
+    QCOMPARE(with_local.at(2).ip(), QStringLiteral("10.0.0.10"));
+    QCOMPARE(with_local.at(3).ip(), QStringLiteral("10.0.0.20"));
+    QCOMPARE(with_local.at(3).source(), QStringLiteral("local"));
 
     for (int index = 0; index < 5; ++index) {
         shared::v1::PeerAddress roaming{};

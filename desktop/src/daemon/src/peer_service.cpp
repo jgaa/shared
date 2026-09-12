@@ -4149,7 +4149,7 @@ void peer_service::merge_claimed_addresses(
 {
     const auto accepted_addresses = bounded_addresses(addresses);
     bool changed{};
-    address_hint_repository_.merge_addresses(peer_id, accepted_addresses, changed);
+    address_hint_repository_.merge_addresses(peer_id, accepted_addresses, changed, false);
     qCDebug(shared_peer_service_log)
         << "Merged claimed addresses"
         << "peer_id=" << peer_id

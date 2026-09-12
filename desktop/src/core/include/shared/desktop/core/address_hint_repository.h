@@ -23,7 +23,8 @@ public:
     void merge_addresses(
         const QString &peer_id,
         const QList<shared::v1::PeerAddress> &addresses,
-        bool &changed) const;
+        bool &changed,
+        bool refresh_existing_lru = true) const;
     void replace_source_addresses(
         const QString &peer_id,
         const QString &source,
