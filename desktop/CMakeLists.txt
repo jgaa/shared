@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(shared_desktop VERSION 0.4.6 LANGUAGES CXX)
+project(shared_desktop VERSION 0.4.7 LANGUAGES CXX)
 
 set(SHARED_APP_ID "eu.lastviking.shared")
 string(TIMESTAMP SHARED_APPSTREAM_RELEASE_DATE "%Y-%m-%d" UTC)
