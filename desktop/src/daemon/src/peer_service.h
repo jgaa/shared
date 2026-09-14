@@ -113,6 +113,7 @@ private:
         bool authenticated{};
         bool peer_info_sent{};
         bool peer_info_received{};
+        qint64 last_received_time_ms{};
     };
 
     struct peer_runtime_state {
@@ -154,6 +155,7 @@ private:
         QString relay_peer_id{};
         QByteArray payload_key{};
         shared::v1::TransferChunk chunk{};
+        QTimer *receiver_response_timer{};
         bool chunk_sent{};
     };
 
@@ -242,7 +244,7 @@ private:
     void send_current_topology(QSslSocket *socket);
     void broadcast_peer_list(QSslSocket *exclude_socket = nullptr);
     void broadcast_address_hint(const shared::v1::AddressHint &hint, QSslSocket *exclude_socket = nullptr);
-    void send_envelope(
+    bool send_envelope(
         QSslSocket *socket,
         const shared::v1::Envelope &envelope,
         const QString &context,
@@ -368,6 +370,7 @@ private:
         const QString &context,
         outbound_priority priority);
     [[nodiscard]] QSslSocket *authenticated_socket_for_peer(const QString &peer_id) const;
+    [[nodiscard]] bool is_usable_authenticated_socket(QSslSocket *socket) const;
     [[nodiscard]] std::optional<shared::v1::PeerListEntry> peer_entry_for_id(const QString &peer_id) const;
     [[nodiscard]] QByteArray payload_key_for_recipient(
         const QString &peer_id,

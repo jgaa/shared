@@ -1769,7 +1769,6 @@ bool app_controller::send_clipboard_to_all()
         return false;
     }
 
-    set_ok_message(QStringLiteral("Clipboard queued for %1 peers").arg(peer_ids.size()));
     return true;
 }
 
@@ -1793,7 +1792,6 @@ bool app_controller::send_clipboard_to_peer(const QString &peer_id)
         return false;
     }
 
-    set_ok_message(QStringLiteral("Clipboard queued for transfer"));
     return true;
 }
 

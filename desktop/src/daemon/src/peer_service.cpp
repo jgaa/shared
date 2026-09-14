@@ -52,6 +52,8 @@ constexpr qsizetype maximum_advertised_reachable_peers{256};
 constexpr qsizetype maximum_advertised_topology_links{512};
 constexpr qsizetype maximum_peer_id_length{64};
 constexpr auto keepalive_interval_ms{15000};
+constexpr auto peer_liveness_timeout_ms{keepalive_interval_ms * 3};
+constexpr auto clipboard_receiver_response_timeout_ms{30000};
 constexpr auto address_hint_republish_interval_ms{30000};
 constexpr auto peer_status_snapshot_coalesce_ms{1000};
 constexpr qsizetype max_remembered_ips_per_peer{5};
@@ -376,6 +378,12 @@ void peer_service::stop()
     }
     incoming_clipboard_transfers_.clear();
     incoming_file_transfers_.clear();
+    for (auto it = outgoing_clipboard_transfers_.begin(); it != outgoing_clipboard_transfers_.end(); ++it) {
+        if (it.value().receiver_response_timer != nullptr) {
+            it.value().receiver_response_timer->stop();
+            delete it.value().receiver_response_timer;
+        }
+    }
     outgoing_clipboard_transfers_.clear();
     outgoing_file_transfers_.clear();
     peer_status_snapshot_write_due_ = true;
@@ -497,9 +505,30 @@ bool peer_service::send_clipboard_text(
         if (socket != nullptr) {
             auto envelope = make_envelope(next_message_id());
             envelope.setTransferOffer(offer);
-            send_envelope(socket, envelope, QStringLiteral("transfer-offer"));
+            if (!send_envelope(socket, envelope, QStringLiteral("transfer-offer"))) {
+                clear_outgoing_transfer(transfer_id);
+                continue;
+            }
+
+            auto *response_timer = new QTimer{this};
+            response_timer->setSingleShot(true);
+            connect(response_timer, &QTimer::timeout, this, [this, transfer_id]() {
+                auto transfer_it = outgoing_clipboard_transfers_.find(transfer_id);
+                if (transfer_it == outgoing_clipboard_transfers_.end()) {
+                    return;
+                }
+                emit_transfer_status(
+                    transfer_id,
+                    transfer_it->recipient_peer_id,
+                    transfer_it->recipient_name,
+                    shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                    QStringLiteral("Receiver did not acknowledge the clipboard offer"));
+                clear_outgoing_transfer(transfer_id);
+            });
+            outgoing_clipboard_transfers_[transfer_id].receiver_response_timer = response_timer;
+            response_timer->start(clipboard_receiver_response_timeout_ms);
             qCInfo(shared_peer_service_log)
-                << "Sent clipboard offer"
+                << "Sent clipboard offer; awaiting receiver confirmation"
                 << "transfer_id=" << transfer_id
                 << "peer_id=" << peer_id
                 << "peer_name=" << peer_entry->identity().name()
@@ -509,7 +538,7 @@ bool peer_service::send_clipboard_text(
                 peer_id,
                 peer_entry->identity().name(),
                 shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL,
-                QStringLiteral("Clipboard offer sent"));
+                QStringLiteral("Awaiting receiver confirmation"));
             sent_any = true;
             continue;
         }
@@ -577,6 +606,24 @@ bool peer_service::send_clipboard_text(
                     clear_outgoing_transfer(transfer_id);
                     return;
                 }
+
+                auto *response_timer = new QTimer{this};
+                response_timer->setSingleShot(true);
+                connect(response_timer, &QTimer::timeout, this, [this, transfer_id]() {
+                    auto transfer_it = outgoing_clipboard_transfers_.find(transfer_id);
+                    if (transfer_it == outgoing_clipboard_transfers_.end()) {
+                        return;
+                    }
+                    emit_transfer_status(
+                        transfer_id,
+                        transfer_it->recipient_peer_id,
+                        transfer_it->recipient_name,
+                        shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR,
+                        QStringLiteral("Receiver did not acknowledge the clipboard offer"));
+                    clear_outgoing_transfer(transfer_id);
+                });
+                transfer_it->receiver_response_timer = response_timer;
+                response_timer->start(clipboard_receiver_response_timeout_ms);
 
                 qCInfo(shared_peer_service_log)
                     << "Sent clipboard offer via relay"
@@ -1104,8 +1151,15 @@ void peer_service::attempt_connections()
 
 void peer_service::send_keepalives()
 {
+    const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (!it.value().authenticated) {
+        if (!is_usable_authenticated_socket(it.key())) {
+            continue;
+        }
+
+        if (it.value().last_received_time_ms != 0
+            && now_ms - it.value().last_received_time_ms > peer_liveness_timeout_ms) {
+            close_socket(it.key(), QStringLiteral("Peer did not respond to keepalive"));
             continue;
         }
 
@@ -1118,7 +1172,7 @@ void peer_service::republish_known_address_hints()
     refresh_local_address_hints();
     auto sent_any = false;
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (!it.value().authenticated) {
+        if (!is_usable_authenticated_socket(it.key())) {
             continue;
         }
 
@@ -1138,7 +1192,7 @@ void peer_service::flush_reachability_broadcast()
 
     auto sent_any = false;
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (!it.value().authenticated) {
+        if (!is_usable_authenticated_socket(it.key())) {
             continue;
         }
 
@@ -1585,7 +1639,7 @@ void peer_service::send_current_topology(QSslSocket *socket)
 void peer_service::broadcast_peer_list(QSslSocket *exclude_socket)
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.key() == exclude_socket || !it.value().authenticated) {
+        if (it.key() == exclude_socket || !is_usable_authenticated_socket(it.key())) {
             continue;
         }
         send_current_peer_list(it.key());
@@ -1595,7 +1649,7 @@ void peer_service::broadcast_peer_list(QSslSocket *exclude_socket)
 void peer_service::broadcast_address_hint(const shared::v1::AddressHint &hint, QSslSocket *exclude_socket)
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.key() == exclude_socket || !it.value().authenticated) {
+        if (it.key() == exclude_socket || !is_usable_authenticated_socket(it.key())) {
             continue;
         }
 
@@ -1611,7 +1665,7 @@ void peer_service::broadcast_address_hint(const shared::v1::AddressHint &hint, Q
     }
 }
 
-void peer_service::send_envelope(
+bool peer_service::send_envelope(
     QSslSocket *socket,
     const shared::v1::Envelope &envelope,
     const QString &context,
@@ -1619,7 +1673,13 @@ void peer_service::send_envelope(
 {
     if (socket == nullptr || !sessions_.contains(socket)) {
         qCWarning(shared_peer_service_log) << "Dropping" << context << "for missing socket";
-        return;
+        return false;
+    }
+    if (sessions_.value(socket).closing
+        || socket->state() != QAbstractSocket::ConnectedState
+        || !socket->isEncrypted()) {
+        qCWarning(shared_peer_service_log) << "Dropping" << context << "for unusable socket";
+        return false;
     }
 
     const auto bytes = core::envelope_io::serialize(envelope);
@@ -1630,18 +1690,23 @@ void peer_service::send_envelope(
         << "bytes=" << bytes.size()
         << "peer=" << sessions_.value(socket).remote_peer_id;
     enqueue_frame(socket, {.bytes = bytes, .context = context, .message_id = envelope.messageId(), .priority = priority});
-    note_peer_activity(socket, false);
+    return true;
 }
 
 void peer_service::note_peer_activity(QSslSocket *socket, bool publish_observed_address)
 {
-    const auto session = sessions_.value(socket);
+    auto session_it = sessions_.find(socket);
+    if (session_it == sessions_.end()) {
+        return;
+    }
+    auto &session = session_it.value();
     if (session.remote_peer_id.isEmpty()) {
         return;
     }
 
+    session.last_received_time_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
     auto &runtime_state = peer_runtime_states_[session.remote_peer_id];
-    runtime_state.last_communication_time_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+    runtime_state.last_communication_time_ms = session.last_received_time_ms;
     runtime_state.last_ip = socket->peerAddress().toString();
     runtime_state.last_port = session.remote_listen_port == 0
         ? static_cast<quint16>(socket->peerPort())
@@ -2616,6 +2681,12 @@ void peer_service::handle_transfer_status(
             return;
         }
 
+        if (transfer_it->receiver_response_timer != nullptr) {
+            transfer_it->receiver_response_timer->stop();
+            transfer_it->receiver_response_timer->deleteLater();
+            transfer_it->receiver_response_timer = nullptr;
+        }
+
         emit_transfer_status(
             transfer_id,
             transfer_it->recipient_peer_id,
@@ -3500,7 +3571,7 @@ void peer_service::maybe_connect_to_peer(
 bool peer_service::has_session_for_peer(const QString &peer_id) const
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.value().remote_peer_id == peer_id && it.value().authenticated) {
+        if (it.value().remote_peer_id == peer_id && is_usable_authenticated_socket(it.key())) {
             return true;
         }
     }
@@ -3511,7 +3582,8 @@ bool peer_service::has_session_for_peer(const QString &peer_id) const
 bool peer_service::has_socket_for_peer(const QString &peer_id) const
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.value().target_peer_id == peer_id || it.value().remote_peer_id == peer_id) {
+        if (!it.value().closing
+            && (it.value().target_peer_id == peer_id || it.value().remote_peer_id == peer_id)) {
             return true;
         }
     }
@@ -3604,7 +3676,7 @@ QStringList peer_service::current_directly_connected_peer_ids() const
 {
     QStringList peer_ids{};
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (!it.value().authenticated || it.value().remote_peer_id.isEmpty()) {
+        if (!is_usable_authenticated_socket(it.key()) || it.value().remote_peer_id.isEmpty()) {
             continue;
         }
 
@@ -3621,7 +3693,7 @@ QSet<QString> peer_service::current_topology_edge_keys() const
 
     for (auto it = sessions_.cbegin(); it != sessions_.cend(); ++it) {
         const auto &session = it.value();
-        if (!session.authenticated || session.remote_peer_id.isEmpty()) {
+        if (!is_usable_authenticated_socket(it.key()) || session.remote_peer_id.isEmpty()) {
             continue;
         }
 
@@ -4022,8 +4094,7 @@ bool peer_service::send_envelope_to_peer(
             return false;
         }
 
-        send_envelope(socket, envelope, context, priority);
-        return true;
+        return send_envelope(socket, envelope, context, priority);
     }
 
     return send_relay_envelope(relay_peer_id, destination_peer_id, envelope, context, priority);
@@ -4056,7 +4127,8 @@ bool peer_service::prune_duplicate_sessions(QSslSocket *socket)
     auto winning_session = candidate_it.value();
     QList<QSslSocket *> duplicate_sockets{};
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.key() == socket || it.value().remote_peer_id != remote_peer_id || !it.value().authenticated) {
+        if (it.key() == socket || it.value().remote_peer_id != remote_peer_id
+            || !is_usable_authenticated_socket(it.key())) {
             continue;
         }
 
@@ -4174,11 +4246,22 @@ void peer_service::merge_claimed_addresses(
 QSslSocket *peer_service::authenticated_socket_for_peer(const QString &peer_id) const
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.value().authenticated && it.value().remote_peer_id == peer_id) {
+        if (it.value().remote_peer_id == peer_id && is_usable_authenticated_socket(it.key())) {
             return it.key();
         }
     }
     return nullptr;
+}
+
+bool peer_service::is_usable_authenticated_socket(QSslSocket *socket) const
+{
+    const auto session_it = sessions_.constFind(socket);
+    return socket != nullptr
+        && session_it != sessions_.cend()
+        && session_it->authenticated
+        && !session_it->closing
+        && socket->state() == QAbstractSocket::ConnectedState
+        && socket->isEncrypted();
 }
 
 std::optional<shared::v1::PeerListEntry> peer_service::peer_entry_for_id(const QString &peer_id) const
@@ -4721,7 +4804,15 @@ void peer_service::clear_incoming_transfer(const QString &transfer_id)
 
 void peer_service::clear_outgoing_transfer(const QString &transfer_id)
 {
-    outgoing_clipboard_transfers_.remove(transfer_id);
+    auto transfer_it = outgoing_clipboard_transfers_.find(transfer_id);
+    if (transfer_it == outgoing_clipboard_transfers_.end()) {
+        return;
+    }
+    if (transfer_it->receiver_response_timer != nullptr) {
+        transfer_it->receiver_response_timer->stop();
+        transfer_it->receiver_response_timer->deleteLater();
+    }
+    outgoing_clipboard_transfers_.erase(transfer_it);
 }
 
 void peer_service::clear_incoming_file_transfer(const QString &transfer_id)
