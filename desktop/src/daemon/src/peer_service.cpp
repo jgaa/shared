@@ -1418,6 +1418,24 @@ void peer_service::close_socket(QSslSocket *socket, const QString &reason)
     socket_send_states_.remove(socket);
     if (session.outbound && !session.authenticated) {
         socket->abort();
+
+        // A connection error may arrive after QAbstractSocket has already
+        // entered UnconnectedState. In that case abort() cannot cause another
+        // disconnected() signal, so the session would otherwise remain in
+        // sessions_ forever and eventually exhaust maximum_peer_sessions.
+        // Defer finalization because close_socket() can be called while a
+        // caller is iterating sessions_. handle_disconnected() is idempotent
+        // for sockets which have already been finalized by the signal.
+        if (socket->state() == QAbstractSocket::UnconnectedState) {
+            QPointer<QSslSocket> guarded_socket{socket};
+            QTimer::singleShot(0, this, [this, guarded_socket]() {
+                if (guarded_socket
+                    && sessions_.contains(guarded_socket.get())
+                    && guarded_socket->state() == QAbstractSocket::UnconnectedState) {
+                    handle_disconnected(guarded_socket.get());
+                }
+            });
+        }
         return;
     }
 
@@ -2077,6 +2095,10 @@ void peer_service::handle_ssl_errors(QSslSocket *socket, const QList<QSslError> 
 
 void peer_service::handle_disconnected(QSslSocket *socket)
 {
+    if (socket == nullptr || !sessions_.contains(socket)) {
+        return;
+    }
+
     const auto session = sessions_.take(socket);
     socket_send_states_.remove(socket);
     const auto should_retry_outbound = session.outbound && !session.target_peer_id.isEmpty();
