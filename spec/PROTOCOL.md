@@ -172,7 +172,7 @@ The current implementation uses these address sources:
 * `PeerInfo.known_addresses`
 * `AddressHint`
 
-`PeerAddress.source` is informational only.
+`PeerAddress.source` is untrusted routing metadata. It affects cache conflict resolution and outbound dialing priority, but it is not authenticated independently and must never be used for identity or authorization decisions.
 
 Current desktop values include:
 
@@ -189,9 +189,20 @@ Current desktop behavior:
 * a peer advertises its own `local` addresses to connected peers
 * peers may rebroadcast directly observed socket endpoints as `observed`
 * peers rebroadcast `local` addresses like other address hints
-* outbound connection attempts prefer `manual`, then `local`, then `direct`, then other hints
+* address knowledge is merged into an ordered, per-peer cache rather than replacing the previous cache
+* the cache contains at most five distinct IP addresses for each peer and is serialized most-recently-used first
+* cache identity is the IP address alone; different ports or sources for the same IP do not create separate entries
+* when the same IP is learned from multiple sources, source precedence is `manual`, then `local`, then `direct`, then `observed`, then any other source; a lower-precedence update does not displace a higher-precedence entry
+* locally learned or directly observed updates touch the selected entry and move it to the MRU front
+* `PeerInfo.known_addresses` and received `AddressHint.addresses` are ordered newest-first; implementations process a received list oldest-first when prepending entries so the sender's order is preserved
+* an exact duplicate received through `PeerInfo` or `AddressHint`—same IP, port, source, and `observed_time_ms`—does not touch the entry's LRU position and is not treated as a cache change
+* changed address knowledge is forwarded to authenticated peers other than the peer from which it was received; suppressing exact-duplicate changes prevents cyclic gossip from continuously reordering and rebroadcasting the same hints
+* invalid entries with an empty IP or zero port are ignored before caching or forwarding
+* outbound connection attempts use a stable source-priority ordering: `manual`, then `local`, then `direct`, then other dialable hints; entries with equal priority retain MRU order
 * outbound connection attempts never dial `observed` endpoints, because they may be NAT mappings or other transport-only addresses
 * outbound connection attempts skip candidates matching the local peer's own advertised interface addresses
+
+The five-address bound and exact-duplicate suppression apply equally to persisted state, `PeerInfo.known_addresses`, and `AddressHint.addresses`. They are protocol interoperability requirements: replacing a peer's complete cache with each received partial hint loses usable endpoints, while refreshing duplicate gossip creates an endless rebroadcast cycle.
 
 ## Reachability and Relay Discovery
 

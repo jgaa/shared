@@ -57,10 +57,11 @@ Android may act as a relay.
 
 `AddressHint` remains wire-compatible.  To prevent gossip amplification, desktop
 now keeps and publishes at most five distinct IP addresses for one peer in a
-single hint. Android should apply the same bound before storing, forwarding, or
-publishing hints. It should deduplicate by IP, retain the most recently seen
-endpoint, and continue to prefer `manual`, `local`, and `direct` addresses when
-dialing.
+single hint. Android must apply the merge, source-precedence, MRU/LRU ordering,
+exact-duplicate suppression, and forwarding rules in `PROTOCOL.md` before
+storing, forwarding, or publishing hints. In particular, a received partial
+hint is merged rather than replacing the peer's cache, and repeated gossip does
+not refresh an exact duplicate. Android must never dial `observed` entries.
 
 Network callbacks must not synchronously rewrite status files or run large log
 formatting work.  Coalesce UI/status updates; run multi-megabyte AES-GCM work on
