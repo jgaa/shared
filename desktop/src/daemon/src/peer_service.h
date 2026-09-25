@@ -104,6 +104,7 @@ private:
         QString local_connection_id{};
         QString target_peer_id{};
         QString remote_peer_id{};
+        QString remote_peer_name{};
         QString remote_connection_id{};
         quint32 remote_peer_list_version{};
         quint16 remote_listen_port{};
@@ -114,6 +115,9 @@ private:
         bool peer_info_sent{};
         bool peer_info_received{};
         qint64 last_received_time_ms{};
+        qint64 ignored_local_hint_window_start_ms{};
+        quint32 ignored_local_hint_count{};
+        bool ignored_local_hint_flood_reported{};
     };
 
     struct peer_runtime_state {

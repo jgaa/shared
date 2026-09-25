@@ -93,6 +93,16 @@ void touch_lru_address(
             < address_source_priority(address.source());
     const auto selected = use_existing ? addresses.at(existing_index) : address;
 
+    // A delayed gossip copy must not replace newer information for the same
+    // endpoint. Otherwise two peers can alternately publish old and new
+    // timestamps and trigger a fresh broadcast on every merge.
+    if (!refresh_existing_lru && existing_index >= 0
+        && addresses.at(existing_index).source() == selected.source()
+        && addresses.at(existing_index).port() == selected.port()
+        && addresses.at(existing_index).observedTimeMs() > selected.observedTimeMs()) {
+        return;
+    }
+
     // Address hints are gossiped. Moving an already-known endpoint to the
     // front on every received copy makes its ordering differ between peers;
     // each peer then considers the hint "changed" and rebroadcasts it. Remote

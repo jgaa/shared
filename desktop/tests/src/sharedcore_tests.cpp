@@ -333,6 +333,11 @@ void sharedcore_tests::address_hint_repository_round_trip()
     repository.merge_addresses(QStringLiteral("peer-1"), {updated}, changed, false);
     QVERIFY(!changed);
 
+    shared::v1::PeerAddress stale = updated;
+    stale.setObservedTimeMs(1000);
+    repository.merge_addresses(QStringLiteral("peer-1"), {stale}, changed, false);
+    QVERIFY(!changed);
+
     const auto loaded = repository.load_for_peer(QStringLiteral("peer-1"));
     QCOMPARE(loaded.size(), 2);
     QCOMPARE(loaded.at(1).ip(), QStringLiteral("10.0.0.10"));

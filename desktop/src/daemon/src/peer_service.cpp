@@ -55,6 +55,8 @@ constexpr auto keepalive_interval_ms{15000};
 constexpr auto peer_liveness_timeout_ms{keepalive_interval_ms * 3};
 constexpr auto clipboard_receiver_response_timeout_ms{30000};
 constexpr auto address_hint_republish_interval_ms{30000};
+constexpr qint64 address_hint_flood_window_ms{10000};
+constexpr quint32 address_hint_flood_threshold{100};
 constexpr auto peer_status_snapshot_coalesce_ms{1000};
 constexpr qsizetype max_remembered_ips_per_peer{5};
 constexpr qint64 outbound_address_retry_delay_ms{3000};
@@ -1497,6 +1499,12 @@ void peer_service::send_known_address_hints(QSslSocket *socket)
 {
     const auto all_addresses = known_addresses_with_live_sessions();
     for (auto it = all_addresses.begin(); it != all_addresses.end(); ++it) {
+        // PeerInfo already carries our addresses. Returning a peer's own
+        // cached addresses can feed stale hints back into its local state.
+        if (it.key() == configuration_.peer_id
+            || it.key() == sessions_.value(socket).remote_peer_id) {
+            continue;
+        }
         const auto addresses = bounded_addresses(it.value());
         if (addresses.isEmpty()) {
             continue;
@@ -1667,7 +1675,9 @@ void peer_service::broadcast_peer_list(QSslSocket *exclude_socket)
 void peer_service::broadcast_address_hint(const shared::v1::AddressHint &hint, QSslSocket *exclude_socket)
 {
     for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
-        if (it.key() == exclude_socket || !is_usable_authenticated_socket(it.key())) {
+        if (it.key() == exclude_socket
+            || it.value().remote_peer_id == hint.peerId().uuid()
+            || !is_usable_authenticated_socket(it.key())) {
             continue;
         }
 
@@ -1957,8 +1967,44 @@ void peer_service::process_authenticated_envelope(
     }
 
     if (envelope.hasAddressHint()) {
+        // Old peers may repeatedly gossip our own cached addresses. Ignore
+        // those copies before logging or touching the address repository.
+        if (envelope.addressHint().hasPeerId()
+            && envelope.addressHint().peerId().uuid() == configuration_.peer_id) {
+            auto &session = sessions_[socket];
+            const auto now_ms = QDateTime::currentDateTimeUtc().toMSecsSinceEpoch();
+            if (session.ignored_local_hint_window_start_ms == 0) {
+                session.ignored_local_hint_window_start_ms = now_ms;
+            } else if (now_ms - session.ignored_local_hint_window_start_ms >= address_hint_flood_window_ms) {
+                if (session.ignored_local_hint_count >= address_hint_flood_threshold) {
+                    qCWarning(shared_peer_service_log)
+                        << "Peer flooding local address hints"
+                        << "name=" << session.remote_peer_name
+                        << "peer_id=" << session.remote_peer_id
+                        << "address=" << socket->peerAddress().toString()
+                        << "count=" << session.ignored_local_hint_count
+                        << "window_ms=" << now_ms - session.ignored_local_hint_window_start_ms;
+                }
+                session.ignored_local_hint_window_start_ms = now_ms;
+                session.ignored_local_hint_count = 0;
+                session.ignored_local_hint_flood_reported = false;
+            }
+            ++session.ignored_local_hint_count;
+            if (session.ignored_local_hint_count == address_hint_flood_threshold
+                && !session.ignored_local_hint_flood_reported) {
+                qCWarning(shared_peer_service_log)
+                    << "Peer flooding local address hints"
+                    << "name=" << session.remote_peer_name
+                    << "peer_id=" << session.remote_peer_id
+                    << "address=" << socket->peerAddress().toString()
+                    << "count=" << session.ignored_local_hint_count
+                    << "window_ms=" << now_ms - session.ignored_local_hint_window_start_ms;
+                session.ignored_local_hint_flood_reported = true;
+            }
+            return;
+        }
         qCDebug(shared_peer_service_log) << "received address-hint" << envelope.messageId();
-        note_peer_activity(socket);
+        note_peer_activity(socket, false);
         handle_address_hint(socket, envelope.addressHint());
         return;
     }
@@ -2175,6 +2221,7 @@ void peer_service::handle_peer_info(QSslSocket *socket, const shared::v1::PeerIn
     }
 
     session_it->remote_peer_id = remote_peer_id;
+    session_it->remote_peer_name = peer_info.identity().name();
     session_it->remote_connection_id = peer_info.connectionId();
     session_it->remote_peer_list_version = peer_info.peerListVersion();
     session_it->remote_listen_port = static_cast<quint16>(peer_info.listenPort());
@@ -2267,6 +2314,13 @@ void peer_service::handle_address_hint(QSslSocket *socket, const shared::v1::Add
     if (!address_hint.hasPeerId() || address_hint.peerId().uuid().isEmpty()
         || address_hint.peerId().uuid().size() > maximum_peer_id_length) {
         qCWarning(shared_peer_service_log) << "Ignoring address hint without peer id";
+        return;
+    }
+
+    // Other peers may have cached older versions of our addresses. Accepting
+    // and rebroadcasting those copies can make the local list oscillate and
+    // create an unbounded address-hint gossip loop.
+    if (address_hint.peerId().uuid() == configuration_.peer_id) {
         return;
     }
 
