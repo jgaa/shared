@@ -65,7 +65,7 @@ set(QCORO_WITH_QML OFF CACHE BOOL "Disable unused QCoro QML support" FORCE)
 set(QCORO_WITH_QTTEST OFF CACHE BOOL "Disable unused QCoro QtTest support" FORCE)
 FetchContent_MakeAvailable(qcoro)
 
-option (SAFEKEEPING_BUILD_TESTS "Disable SafeKeeping tests in shared_desktop" ON)
+set(SAFEKEEPING_BUILD_TESTS OFF CACHE BOOL "Disable SafeKeeping tests in shared_desktop" FORCE)
 option (SAFEKEEPING_ENABLE_KWALLET "Enable KWallet support in shared_desktop" ON)
 FetchContent_Declare(safekeeping
     GIT_REPOSITORY https://github.com/jgaa/SafeKeeping.git
