@@ -84,6 +84,7 @@ jobs:
             flatpak/local.shared.Shared.yaml
           flatpak build builddir test -f /app/share/metainfo/eu.lastviking.shared.metainfo.xml
           flatpak build builddir test -f /app/share/applications/eu.lastviking.shared.desktop
+          flatpak build builddir sh -c 'readelf -d /app/bin/sharedgui | grep -q libKF6Wallet.so'
           flatpak build-bundle repo "${BUNDLE_NAME}" eu.lastviking.shared main
 
       - name: Upload Flatpak bundle
