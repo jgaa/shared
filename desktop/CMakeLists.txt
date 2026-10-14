@@ -77,10 +77,9 @@ FetchContent_Declare(safekeeping
 )
 FetchContent_MakeAvailable(safekeeping)
 
-find_package(Qt6 6.10 REQUIRED COMPONENTS
+find_package(Qt6 REQUIRED COMPONENTS
     Concurrent
     Core
-    Core5Compat
     Network
     Protobuf
     ProtobufTools
@@ -107,12 +106,12 @@ if(BUILD_TESTING)
 endif()
 
 if(shared_qt_optional_components)
-    find_package(Qt6 6.10 REQUIRED COMPONENTS ${shared_qt_optional_components})
+    find_package(Qt6 REQUIRED COMPONENTS ${shared_qt_optional_components})
 endif()
 
 find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 
-qt_standard_project_setup(REQUIRES 6.10)
+qt_standard_project_setup()
 
 include(shared_common)
 
