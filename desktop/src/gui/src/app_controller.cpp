@@ -410,8 +410,9 @@ QString unique_staging_path(const QString &directory_path, const QString &filena
 
 }
 
-app_controller::app_controller(QObject *parent)
+app_controller::app_controller(QObject *parent, core::app_paths paths)
     : QObject{parent}
+    , app_paths_{std::move(paths)}
     , clipboard_limit_megabytes_{settings_repository_.clipboard_limit_bytes() / bytes_per_megabyte}
 {
     [[maybe_unused]] const auto directories_ready = app_paths_.ensure_directories();
@@ -1338,7 +1339,7 @@ void app_controller::remove_pending_request(const QString &request_id)
 bool app_controller::send_clipboard_to_all()
 {
     if (service_ == nullptr) {
-        set_last_error(QStringLiteral("Background service is unavailable"));
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), QStringLiteral("Background service is unavailable"));
         return false;
     }
 
@@ -1351,14 +1352,14 @@ bool app_controller::send_clipboard_to_all()
     }
 
     if (peer_ids.isEmpty()) {
-        set_last_error(QStringLiteral("No verified peers are available"));
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), QStringLiteral("No verified peers are available"));
         return false;
     }
 
     const auto clipboard_text = QGuiApplication::clipboard()->text();
     QString error_message{};
     if (!service_->send_clipboard_text(peer_ids, clipboard_text, error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), error_message);
         return false;
     }
 
@@ -1368,20 +1369,20 @@ bool app_controller::send_clipboard_to_all()
 bool app_controller::send_clipboard_to_peer(const QString &peer_id)
 {
     if (service_ == nullptr) {
-        set_last_error(QStringLiteral("Background service is unavailable"));
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), QStringLiteral("Background service is unavailable"));
         return false;
     }
 
     const auto available = std::any_of(available_peers_.rows().cbegin(), available_peers_.rows().cend(),
         [&peer_id](const auto &peer) { return peer.peer_id == peer_id; });
     if (!available) {
-        set_last_error(QStringLiteral("Selected peer is currently unavailable"));
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), QStringLiteral("Selected peer is currently unavailable"));
         return false;
     }
 
     QString error_message{};
     if (!service_->send_clipboard_text({peer_id}, QGuiApplication::clipboard()->text(), error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), error_message);
         return false;
     }
 
@@ -1393,7 +1394,7 @@ QStringList app_controller::select_files()
     QString error_message{};
     const auto selected = desktop_integration::select_files(download_path(), error_message);
     if (!error_message.isEmpty()) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message);
     }
     return normalize_selected_file_inputs(selected);
 }
@@ -1403,7 +1404,7 @@ QStringList app_controller::stage_dropped_files(const QStringList &file_paths)
     QString error_message{};
     const auto staged_files = stage_files_for_transfer(file_paths, error_message);
     if (staged_files.isEmpty()) {
-        set_last_error(error_message.isEmpty()
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message.isEmpty()
             ? QStringLiteral("No readable files were dropped")
             : error_message);
         return {};
@@ -1415,7 +1416,7 @@ QStringList app_controller::stage_dropped_files(const QStringList &file_paths)
 bool app_controller::send_files_to_all(const QStringList &file_paths)
 {
     if (service_ == nullptr) {
-        set_last_error(QStringLiteral("Background service is unavailable"));
+        report_transfer_failure(QStringLiteral("File transfer failed"), QStringLiteral("Background service is unavailable"));
         return false;
     }
 
@@ -1427,21 +1428,21 @@ bool app_controller::send_files_to_all(const QStringList &file_paths)
     }
 
     if (peer_ids.isEmpty()) {
-        set_last_error(QStringLiteral("No verified peers are available"));
+        report_transfer_failure(QStringLiteral("File transfer failed"), QStringLiteral("No verified peers are available"));
         return false;
     }
 
     QString error_message{};
     const auto staged_files = stage_files_for_transfer(file_paths, error_message);
     if (staged_files.isEmpty()) {
-        set_last_error(error_message.isEmpty()
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message.isEmpty()
             ? QStringLiteral("No readable files were selected")
             : error_message);
         return false;
     }
 
     if (!service_->send_files(peer_ids, staged_files, error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message);
         return false;
     }
 
@@ -1452,28 +1453,28 @@ bool app_controller::send_files_to_all(const QStringList &file_paths)
 bool app_controller::send_files_to_peer(const QString &peer_id, const QStringList &file_paths)
 {
     if (service_ == nullptr) {
-        set_last_error(QStringLiteral("Background service is unavailable"));
+        report_transfer_failure(QStringLiteral("File transfer failed"), QStringLiteral("Background service is unavailable"));
         return false;
     }
 
     const auto available = std::any_of(available_peers_.rows().cbegin(), available_peers_.rows().cend(),
         [&peer_id](const auto &peer) { return peer.peer_id == peer_id; });
     if (!available) {
-        set_last_error(QStringLiteral("Selected peer is currently unavailable"));
+        report_transfer_failure(QStringLiteral("File transfer failed"), QStringLiteral("Selected peer is currently unavailable"));
         return false;
     }
 
     QString error_message{};
     const auto staged_files = stage_files_for_transfer(file_paths, error_message);
     if (staged_files.isEmpty()) {
-        set_last_error(error_message.isEmpty()
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message.isEmpty()
             ? QStringLiteral("No readable files were selected")
             : error_message);
         return false;
     }
 
     if (!service_->send_files({peer_id}, staged_files, error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message);
         return false;
     }
 
@@ -1530,6 +1531,8 @@ bool app_controller::remove_authorized_peer(const QString &peer_id)
 void app_controller::copy_to_clipboard(const QString &text)
 {
     QGuiApplication::clipboard()->setText(text);
+    emit transfer_notification_requested(QStringLiteral("Clipboard copy completed"),
+        QStringLiteral("Copied to clipboard"), true);
 }
 
 bool app_controller::refresh_connections()
@@ -1554,13 +1557,13 @@ bool app_controller::refresh_connections()
 bool app_controller::approve_clipboard_transfer()
 {
     if (service_ == nullptr || clipboard_approval_transfer_id_.isEmpty()) {
-        set_last_error(QStringLiteral("No clipboard approval is pending"));
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), QStringLiteral("No clipboard approval is pending"));
         return false;
     }
 
     QString error_message{};
     if (!service_->approve_clipboard_transfer(clipboard_approval_transfer_id_, error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), error_message);
         return false;
     }
 
@@ -1572,7 +1575,7 @@ bool app_controller::approve_clipboard_transfer()
 bool app_controller::reject_clipboard_transfer()
 {
     if (service_ == nullptr || clipboard_approval_transfer_id_.isEmpty()) {
-        set_last_error(QStringLiteral("No clipboard approval is pending"));
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), QStringLiteral("No clipboard approval is pending"));
         return false;
     }
 
@@ -1581,7 +1584,7 @@ bool app_controller::reject_clipboard_transfer()
             clipboard_approval_transfer_id_,
             QStringLiteral("Clipboard transfer rejected by receiver"),
             error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("Clipboard copy failed"), error_message);
         return false;
     }
 
@@ -1593,13 +1596,13 @@ bool app_controller::reject_clipboard_transfer()
 bool app_controller::approve_file_transfer()
 {
     if (service_ == nullptr || file_approval_transfer_id_.isEmpty()) {
-        set_last_error(QStringLiteral("No file approval is pending"));
+        report_transfer_failure(QStringLiteral("File transfer failed"), QStringLiteral("No file approval is pending"));
         return false;
     }
 
     QString error_message{};
     if (!service_->approve_file_transfer(file_approval_transfer_id_, error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message);
         return false;
     }
 
@@ -1611,7 +1614,7 @@ bool app_controller::approve_file_transfer()
 bool app_controller::reject_file_transfer()
 {
     if (service_ == nullptr || file_approval_transfer_id_.isEmpty()) {
-        set_last_error(QStringLiteral("No file approval is pending"));
+        report_transfer_failure(QStringLiteral("File transfer failed"), QStringLiteral("No file approval is pending"));
         return false;
     }
 
@@ -1620,7 +1623,7 @@ bool app_controller::reject_file_transfer()
             file_approval_transfer_id_,
             QStringLiteral("File transfer rejected by receiver"),
             error_message)) {
-        set_last_error(error_message);
+        report_transfer_failure(QStringLiteral("File transfer failed"), error_message);
         return false;
     }
 
@@ -1649,6 +1652,54 @@ void app_controller::set_status_message(const QString &message, status_level lev
     status_message_ = message;
     status_level_ = level;
     emit state_changed();
+}
+
+void app_controller::report_transfer_failure(const QString &title, const QString &message)
+{
+    const auto detail = message.isEmpty() ? QStringLiteral("The operation failed") : message;
+    set_last_error(detail);
+    emit transfer_notification_requested(title, detail, false);
+}
+
+void app_controller::report_transfer_status(
+    const QString &kind, const QString &peer_name, int status, const QString &message)
+{
+    using code = shared::v1::TransferStatusCodeGadget::TransferStatusCode;
+    const auto value = static_cast<code>(status);
+    QString detail = message;
+    if (detail.isEmpty()) {
+        switch (value) {
+        case code::TRANSFER_STATUS_COMPLETED: detail = QStringLiteral("Transfer completed"); break;
+        case code::TRANSFER_STATUS_REJECTED: detail = QStringLiteral("Transfer rejected"); break;
+        case code::TRANSFER_STATUS_CANCELLED: detail = QStringLiteral("Transfer cancelled"); break;
+        case code::TRANSFER_STATUS_ERROR: detail = QStringLiteral("Transfer failed"); break;
+        default: return;
+        }
+    }
+    const auto full_message = peer_name.isEmpty() ? detail : QStringLiteral("%1: %2").arg(peer_name, detail);
+    switch (value) {
+    case code::TRANSFER_STATUS_COMPLETED:
+        set_ok_message(full_message);
+        emit transfer_notification_requested(kind + QStringLiteral(" completed"), full_message, true);
+        break;
+    case code::TRANSFER_STATUS_REJECTED:
+    case code::TRANSFER_STATUS_CANCELLED:
+        set_warning_message(full_message);
+        emit transfer_notification_requested(kind + QStringLiteral(" failed"), full_message, false);
+        break;
+    case code::TRANSFER_STATUS_ERROR:
+        report_transfer_failure(kind + QStringLiteral(" failed"), full_message);
+        break;
+    case code::TRANSFER_STATUS_ACCEPTED:
+        set_ok_message(full_message);
+        break;
+    case code::TRANSFER_STATUS_PENDING_APPROVAL:
+        set_warning_message(full_message);
+        break;
+    default:
+        set_last_error(full_message);
+        break;
+    }
 }
 
 void app_controller::set_last_error(const QString &message)
@@ -2203,7 +2254,9 @@ void app_controller::handle_clipboard_text_received(
         << "sender=" << sender_name
         << "bytes=" << text.toUtf8().size();
     clear_pending_clipboard_approval();
-    set_ok_message(QStringLiteral("Clipboard received from %1").arg(sender_name));
+    const auto message = QStringLiteral("Clipboard received from %1").arg(sender_name);
+    set_ok_message(message);
+    emit transfer_notification_requested(QStringLiteral("Clipboard copy completed"), message, true);
 }
 
 void app_controller::handle_clipboard_transfer_status(
@@ -2227,24 +2280,7 @@ void app_controller::handle_clipboard_transfer_status(
         clear_pending_clipboard_approval();
     }
 
-    if (!message.isEmpty()) {
-        const auto full_message = QStringLiteral("%1: %2").arg(peer_name, message);
-        switch (static_cast<shared::v1::TransferStatusCodeGadget::TransferStatusCode>(status)) {
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED:
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED:
-            set_ok_message(full_message);
-            break;
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL:
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED:
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_CANCELLED:
-            set_warning_message(full_message);
-            break;
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR:
-        default:
-            set_last_error(full_message);
-            break;
-        }
-    }
+    report_transfer_status(QStringLiteral("Clipboard copy"), peer_name, status, message);
 }
 
 void app_controller::handle_file_approval_requested(
@@ -2279,7 +2315,9 @@ void app_controller::handle_file_received(
         << "sender=" << sender_name
         << "filename=" << filename
         << "saved_path=" << saved_path;
-    set_ok_message(QStringLiteral("Received %1 from %2").arg(filename, sender_name));
+    const auto message = QStringLiteral("Received %1 from %2").arg(filename, sender_name);
+    set_ok_message(message);
+    emit transfer_notification_requested(QStringLiteral("File transfer completed"), message, true);
 }
 
 void app_controller::handle_file_transfer_status(
@@ -2302,24 +2340,7 @@ void app_controller::handle_file_transfer_status(
         clear_pending_file_approval();
     }
 
-    if (!message.isEmpty()) {
-        const auto full_message = QStringLiteral("%1: %2").arg(peer_name, message);
-        switch (static_cast<shared::v1::TransferStatusCodeGadget::TransferStatusCode>(status)) {
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ACCEPTED:
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_COMPLETED:
-            set_ok_message(full_message);
-            break;
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_PENDING_APPROVAL:
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_REJECTED:
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_CANCELLED:
-            set_warning_message(full_message);
-            break;
-        case shared::v1::TransferStatusCodeGadget::TransferStatusCode::TRANSFER_STATUS_ERROR:
-        default:
-            set_last_error(full_message);
-            break;
-        }
-    }
+    report_transfer_status(QStringLiteral("File transfer"), peer_name, status, message);
 }
 
 void app_controller::clear_pending_clipboard_approval()

@@ -141,7 +141,7 @@ public:
     };
     Q_ENUM(status_level)
 
-    explicit app_controller(QObject *parent = nullptr);
+    explicit app_controller(QObject *parent = nullptr, core::app_paths paths = {});
     void set_service(daemon::daemon_application *service);
 
     [[nodiscard]] QString app_name() const;
@@ -258,6 +258,7 @@ public:
     Q_INVOKABLE bool reject_file_transfer();
 
 signals:
+    void transfer_notification_requested(const QString &title, const QString &message, bool success);
     void clipboard_limit_megabytes_changed();
     void transfer_settings_changed();
     void configuration_changed();
@@ -274,6 +275,8 @@ private:
     void clear_status_message();
     void set_status_message(const QString &message, status_level level);
     void set_last_error(const QString &message);
+    void report_transfer_failure(const QString &title, const QString &message);
+    void report_transfer_status(const QString &kind, const QString &peer_name, int status, const QString &message);
     void set_warning_message(const QString &message);
     void set_ok_message(const QString &message);
     [[nodiscard]] bool save_configuration_field(std::function<void(core::agent_configuration &)> update);

@@ -164,6 +164,14 @@ tray_controller::tray_controller(app_controller *controller, QWindow *window, bo
             toggle_window_visibility();
         }
     });
+    connect(controller_, &app_controller::transfer_notification_requested, this,
+        [this](const QString &title, const QString &message, bool success) {
+            if (QSystemTrayIcon::supportsMessages()) {
+                tray_icon_->showMessage(title, message,
+                    success ? QSystemTrayIcon::Information : QSystemTrayIcon::Critical,
+                    success ? 5000 : 10000);
+            }
+        });
     connect(controller_, &app_controller::state_changed, this, &tray_controller::refresh_state);
     connect(controller_, &app_controller::clipboard_approval_changed, this, &tray_controller::refresh_state);
     connect(controller_, &app_controller::file_approval_changed, this, &tray_controller::refresh_state);

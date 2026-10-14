@@ -98,6 +98,7 @@ private slots:
     void schedule_peer_status_snapshot();
 
 private:
+    friend class peer_service_tests;
     struct session_state {
         QByteArray buffer{};
         QList<shared::v1::Envelope> pending_pre_auth_messages{};
@@ -176,6 +177,7 @@ private:
         quint64 expected_size{};
         quint64 chunk_count{};
         bool worker_started{};
+        QTimer *receiver_response_timer{};
     };
 
     struct incoming_clipboard_transfer {
@@ -393,7 +395,9 @@ private:
     void enqueue_frame(QSslSocket *socket, outbound_frame frame);
     [[nodiscard]] std::optional<outbound_frame> take_next_frame(QSslSocket *socket);
     void start_outgoing_file_transfer(const QString &transfer_id);
-    [[nodiscard]] QCoro::Task<> run_outgoing_file_transfer(QString transfer_id);
+    [[nodiscard]] QCoro::Task<bool> run_outgoing_file_transfer(QString transfer_id);
+    void finish_outgoing_file_send(const QString &transfer_id, bool queued);
+    void arm_transfer_response_timeout(const QString &transfer_id, bool file_transfer, int timeout_ms, const QString &message);
     void emit_transfer_status(
         const QString &transfer_id,
         const QString &peer_id,

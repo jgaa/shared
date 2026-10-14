@@ -240,9 +240,9 @@ cmake -S desktop -B build \
     -DFETCHCONTENT_SOURCE_DIR_SAFEKEEPING=/absolute/path/to/SafeKeeping
 ```
 
-macOS CI builds the GUI and headless frontend, runs the isolated core tests, and
-installs the app bundle. Native Keychain prompts, login startup, clipboard/file
-transfers, and tray behavior still need a smoke test in a logged-in Mac session.
+macOS GitHub Actions builds are disabled until a prebuilt Qt SDK is provided.
+Native Keychain prompts, login startup, clipboard/file transfers, and tray
+behavior still need a smoke test in a logged-in Mac session.
 
 ### Flatpak
 

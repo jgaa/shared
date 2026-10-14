@@ -84,6 +84,16 @@ Current desktop behavior includes:
 * optional auto-accept for clipboard transfers
 * optional auto-accept for file transfers
 * incoming file staging into a temporary `.part` file before final rename
+* desktop notifications for completed clipboard copies and file transfers
+* failure notifications for send errors, receive errors, rejection, cancellation,
+  lost connections, and missing completion acknowledgements
+
+Sender success is reported only after the recipient sends `TRANSFER_STATUS_COMPLETED`.
+Queuing chunks, accepting an offer, and waiting for approval do not count as success.
+The sender retains file-transfer state after queuing the last chunk so it can process
+completion or failure. Offers and final acknowledgements have a 30-second response
+deadline; pending approval allows the receiver's three-minute approval window plus
+30 seconds. Losing the active route clears interrupted transfers and partial files.
 
 Desktop currently implements:
 
