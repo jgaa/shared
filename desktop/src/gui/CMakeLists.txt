@@ -14,6 +14,10 @@ set_source_files_properties(qml/SharedColors.qml PROPERTIES QT_QML_SINGLETON_TYP
 qt_add_qml_module(sharedui
     URI Shared.Gui
     VERSION 1.0
+    # Controllers are passed as QObject instances; this module exports QML
+    # files, not C++ QML types. Avoid generating unused C++ registration code.
+    NO_GENERATE_QMLTYPES
+    NO_PLUGIN
     # Keep the embedded module on Qt's default import path regardless of
     # inherited Qt CMake policies or the app bundle's working directory.
     RESOURCE_PREFIX /qt/qml
@@ -70,8 +74,6 @@ target_link_libraries(sharedgui PRIVATE
     Qt6::QuickControls2
     Qt6::Widgets
     sharedui
-    shareduiplugin
-    shareduiplugin_init
     sharedcore
 )
 

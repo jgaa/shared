@@ -107,7 +107,7 @@ enrollment_client::result enrollment_client::enroll_prepared(
     QObject::connect(&socket, &QSslSocket::errorOccurred, [&socket](QAbstractSocket::SocketError) {
         qCWarning(shared_enrollment_client_log) << "Socket error during enrollment" << socket.errorString();
     });
-    QObject::connect(&socket, &QSslSocket::sslErrors, [&socket](const QList<QSslError> &errors) {
+    QObject::connect(&socket, &QSslSocket::sslErrors, [](const QList<QSslError> &errors) {
         for (const auto &error : errors) {
             qCWarning(shared_enrollment_client_log) << "TLS error during enrollment" << error.errorString();
         }

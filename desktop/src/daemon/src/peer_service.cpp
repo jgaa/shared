@@ -3709,7 +3709,7 @@ void peer_service::maybe_connect_to_peer(
         attach_socket(socket, true);
         sessions_[socket].target_peer_id = peer_id;
         pending_connections_.insert(peer_id);
-        connect(socket, &QSslSocket::connected, this, [this, socket, peer_id]() {
+        connect(socket, &QSslSocket::connected, this, [socket, peer_id]() {
             qCDebug(shared_peer_service_log)
                 << "tcp connection established to peer"
                 << "peer_id=" << peer_id

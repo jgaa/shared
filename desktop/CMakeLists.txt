@@ -47,6 +47,8 @@ else()
 endif()
 
 FetchContent_MakeAvailable(logfault)
+# Treat dependency headers as system headers while retaining warnings in Shared.
+set_property(TARGET logfault PROPERTY SYSTEM TRUE)
 
 set(SHARED_QCORO_SOURCE_DIR "" CACHE PATH "Use a local source dir for QCoro")
 if(SHARED_QCORO_SOURCE_DIR AND EXISTS "${SHARED_QCORO_SOURCE_DIR}/CMakeLists.txt")
