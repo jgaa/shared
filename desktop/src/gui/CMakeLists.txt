@@ -12,6 +12,10 @@ target_include_directories(sharedui PUBLIC
 qt_add_qml_module(sharedui
     URI Shared.Gui
     VERSION 1.0
+    # Keep the embedded module on Qt's default import path regardless of
+    # inherited Qt CMake policies or the app bundle's working directory.
+    RESOURCE_PREFIX /qt/qml
+    OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Shared/Gui"
     QML_FILES
         qml/AboutDialog.qml
         qml/EgoGraphDialog.qml

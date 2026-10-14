@@ -23,7 +23,9 @@ add_test(NAME peer_service_tests COMMAND peer_service_tests)
 
 if(SHARED_BUILD_GUI)
     qt_add_executable(transfer_notification_tests src/transfer_notification_tests.cpp)
-    target_link_libraries(transfer_notification_tests PRIVATE Qt6::Test sharedui)
+    target_link_libraries(transfer_notification_tests PRIVATE
+        Qt6::Test sharedui shareduiplugin shareduiplugin_init
+    )
     set_target_properties(transfer_notification_tests PROPERTIES MACOSX_BUNDLE FALSE)
     shared_set_common_target_options(transfer_notification_tests)
     add_test(NAME transfer_notification_tests COMMAND transfer_notification_tests)

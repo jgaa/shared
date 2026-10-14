@@ -6,6 +6,8 @@
 #include <QtCore/QTemporaryDir>
 #include <QtGui/QClipboard>
 #include <QtGui/QGuiApplication>
+#include <QtQml/QQmlApplicationEngine>
+#include <QtQml/QQmlContext>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 
@@ -34,6 +36,18 @@ private slots:
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, directory_.path());
         QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, directory_.path());
+    }
+
+    void main_qml_loads_from_embedded_module()
+    {
+        app_controller controller{nullptr, app_paths{directory_.path()}};
+        QQmlApplicationEngine engine{};
+        engine.setInitialProperties({
+            {QStringLiteral("app_controller"), QVariant::fromValue(&controller)},
+        });
+        engine.rootContext()->setContextProperty(QStringLiteral("app_controller"), &controller);
+        engine.loadFromModule("Shared.Gui", "Main");
+        QVERIFY2(!engine.rootObjects().isEmpty(), "Embedded Shared.Gui module must provide Main");
     }
 
     void terminal_status_notifications_data()
