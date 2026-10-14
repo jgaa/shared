@@ -3,6 +3,16 @@
 
 #include <safekeeping/SafeKeeping.h>
 
+#include <QtCore/QCoreApplication>
+#include <QtCore/QLoggingCategory>
+#include <QtNetwork/QSslSocket>
+
+#if defined(Q_OS_MACOS)
+#include <openssl/ssl.h>
+#endif
+
+Q_LOGGING_CATEGORY(shared_system_integration_log, "shared.desktop.core.system_integration")
+
 namespace shared::desktop::core::system_integration {
 
 shared::v1::PlatformGadget::Platform current_platform() noexcept
@@ -46,6 +56,45 @@ void configure_vault_backend()
     vault::setLinuxVaultBackend(vault::LinuxVaultBackend::Auto);
 #endif
     // SafeKeeping selects the native backend (including Keychain) elsewhere.
+}
+
+bool configure_tls_backend(QString &error_message)
+{
+    error_message.clear();
+#if defined(Q_OS_MACOS)
+    // Secure Transport's Qt PKCS#12 encoder does not support our P-256 EC
+    // identity keys. Use OpenSSL consistently for CLI, IDE, and bundled runs.
+    // Referencing libssl explicitly also keeps it loaded when Qt resolves its
+    // OpenSSL symbols dynamically, without Qt Creator's library environment.
+    if (OPENSSL_init_ssl(0, nullptr) != 1) {
+        error_message = QStringLiteral("Failed to initialize the OpenSSL TLS library");
+        return false;
+    }
+    const auto backend = QStringLiteral("openssl");
+    if (!QSslSocket::availableBackends().contains(backend)
+        || (QSslSocket::activeBackend() != backend && !QSslSocket::setActiveBackend(backend))) {
+        error_message = QStringLiteral(
+            "Shared requires Qt's OpenSSL TLS backend on macOS for P-256 peer identities. "
+            "Install/deploy the Qt OpenSSL TLS plugin and compatible OpenSSL libraries. "
+            "Available backends: %1; Qt plugin paths: %2")
+            .arg(QSslSocket::availableBackends().join(QStringLiteral(", ")),
+                 QCoreApplication::libraryPaths().join(QStringLiteral(", ")));
+        return false;
+    }
+#endif
+    if (!QSslSocket::supportsSsl()) {
+        error_message = QStringLiteral("Qt TLS support is unavailable (backend: %1)")
+            .arg(QSslSocket::activeBackend());
+        return false;
+    }
+    qCInfo(shared_system_integration_log)
+        << "TLS backend:" << QSslSocket::activeBackend()
+        << "runtime library:" << QSslSocket::sslLibraryVersionString()
+        << "build library:" << QSslSocket::sslLibraryBuildVersionString();
+    qCDebug(shared_system_integration_log)
+        << "Available TLS backends:" << QSslSocket::availableBackends()
+        << "Qt plugin paths:" << QCoreApplication::libraryPaths();
+    return true;
 }
 
 }

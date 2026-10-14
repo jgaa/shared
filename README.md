@@ -208,6 +208,44 @@ cmake -S desktop -B build -G Ninja \
     -DSHARED_QCORO_SOURCE_DIR=/path/to/qcoro
 ```
 
+### Windows
+
+Use a C++20 MSVC toolchain and a matching prebuilt Qt 6.10 or newer SDK.
+For native Windows builds, CMake uses vcpkg from `C:\src\vcpkg` by default.
+The manifest in `desktop/vcpkg.json` installs SQLite3 and libsodium for SafeKeeping
+and OpenSSL for Shared during configuration. Qt remains supplied by your Qt SDK.
+
+If vcpkg is not installed yet, run in PowerShell:
+
+```powershell
+git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\src\vcpkg
+& C:\src\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+```
+
+From a Visual Studio developer shell, configure and build:
+
+```powershell
+cmake -S desktop -B build-windows -G Ninja `
+    -DCMAKE_BUILD_TYPE=Release `
+    -DCMAKE_PREFIX_PATH=C:/Qt/6.10.0/msvc2022_64 `
+    -DVCPKG_TARGET_TRIPLET=x64-windows
+cmake --build build-windows --parallel
+```
+
+Replace the Qt path with your installed SDK. Match the vcpkg triplet to the
+compiler and Qt architecture (for example, `arm64-windows` for ARM64).
+To override the vcpkg location, add `-DSHARED_VCPKG_ROOT=D:/tools/vcpkg`
+to the configure command or set the `VCPKG_ROOT` environment variable before
+the first configuration. In Qt Creator, add the same CMake variable in the
+project's initial configuration.
+
+An explicitly supplied `CMAKE_TOOLCHAIN_FILE` takes precedence. To use vcpkg
+with another toolchain, select vcpkg's `scripts/buildsystems/vcpkg.cmake` as
+`CMAKE_TOOLCHAIN_FILE` and supply the other toolchain as
+`VCPKG_CHAINLOAD_TOOLCHAIN_FILE`. Use `-DSHARED_USE_VCPKG=OFF` to disable
+automatic selection and provide the native dependencies yourself. Use a fresh
+build directory when changing toolchains, compilers, or triplets.
+
 ### macOS
 
 Install Xcode command-line tools and the native dependencies with Homebrew:
@@ -243,6 +281,12 @@ cmake -S desktop -B build \
 macOS GitHub Actions builds are disabled until a prebuilt Qt SDK is provided.
 Native Keychain prompts, login startup, clipboard/file transfers, and tray
 behavior still need a smoke test in a logged-in Mac session.
+
+On macOS, Shared explicitly uses Qt's OpenSSL TLS backend for its P-256 peer
+identities. The Qt SDK and deployed app must include the OpenSSL TLS plugin
+and compatible OpenSSL libraries. Startup logs the selected backend and library
+versions, and exits with a diagnostic if the required backend is unavailable.
+This applies to terminal, Qt Creator, and app-bundle launches alike.
 
 ### Flatpak
 

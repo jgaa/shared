@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 
+# vcpkg must be selected before project() initializes the compiler/toolchain.
+include(cmake/shared_vcpkg.cmake)
+
 project(shared_desktop VERSION 0.5.0 LANGUAGES CXX)
 
 set(SHARED_APP_ID "eu.lastviking.shared")

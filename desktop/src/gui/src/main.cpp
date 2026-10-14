@@ -7,6 +7,7 @@
 #include "shared/desktop/core/logging.h"
 #include "shared/desktop/core/logging_controller.h"
 #include "shared/desktop/core/security_materials.h"
+#include "shared/desktop/core/system_integration.h"
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
@@ -106,6 +107,12 @@ int main(int argc, char *argv[])
 
     LOG_INFO << "Starting shared GUI";
     LOG_INFO << "Settings file: " << logging_controller.settings_file_path().toStdString();
+
+    QString tls_error{};
+    if (!shared::desktop::core::system_integration::configure_tls_backend(tls_error)) {
+        LOG_ERROR << tls_error.toStdString();
+        return 1;
+    }
 
     if (parser.isSet(reset_option)) {
         try {

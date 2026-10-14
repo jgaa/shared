@@ -1,0 +1,8 @@
+{
+  "name": "shared-desktop",
+  "dependencies": [
+    "libsodium",
+    "openssl",
+    "sqlite3"
+  ]
+}
