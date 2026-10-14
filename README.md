@@ -288,6 +288,22 @@ and compatible OpenSSL libraries. Startup logs the selected backend and library
 versions, and exits with a diagnostic if the required backend is unavailable.
 This applies to terminal, Qt Creator, and app-bundle launches alike.
 
+The macOS GUI build stages shared OpenSSL libraries in the build app's
+`Contents/Frameworks` so Qt can find them outside Qt Creator. For an existing
+build that reports only `securetransport, cert-only` backends, you can launch
+from its `bin` directory with:
+
+```bash
+DYLD_LIBRARY_PATH="$(brew --prefix openssl@3)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+    ./sharedgui.app/Contents/MacOS/sharedgui
+```
+
+If OpenSSL was installed elsewhere, use that installation's library directory
+instead. `QT_DEBUG_PLUGINS=1` adds Qt plugin loading diagnostics if the backend
+is still unavailable. For distribution, use `cmake --install` as shown above
+to deploy the Qt libraries, TLS plugin, and runtime dependencies. A DMG is an
+optional container for the deployed `.app`; it does not resolve dependencies.
+
 ### Flatpak
 
 The repository also contains Flatpak packaging under `flatpak/`. The GitHub `Flatpak` workflow is the reference build for release artifacts.

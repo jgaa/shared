@@ -64,8 +64,8 @@ bool configure_tls_backend(QString &error_message)
 #if defined(Q_OS_MACOS)
     // Secure Transport's Qt PKCS#12 encoder does not support our P-256 EC
     // identity keys. Use OpenSSL consistently for CLI, IDE, and bundled runs.
-    // Referencing libssl explicitly also keeps it loaded when Qt resolves its
-    // OpenSSL symbols dynamically, without Qt Creator's library environment.
+    // Initialize the linked TLS library too. Qt's dynamic backend still needs
+    // the dylibs in its search path (Contents/Frameworks in the macOS GUI app).
     if (OPENSSL_init_ssl(0, nullptr) != 1) {
         error_message = QStringLiteral("Failed to initialize the OpenSSL TLS library");
         return false;

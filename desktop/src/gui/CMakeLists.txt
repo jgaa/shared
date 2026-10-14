@@ -87,6 +87,22 @@ if(APPLE)
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
     )
+
+    # Qt's dynamically loaded OpenSSL backend searches Contents/Frameworks on
+    # macOS, but does not discover Homebrew libraries already loaded by Shared.
+    # Stage the libraries for terminal launches of the build-tree app too.
+    if(OPENSSL_SSL_LIBRARY MATCHES "\\.dylib$" AND OPENSSL_CRYPTO_LIBRARY MATCHES "\\.dylib$")
+        add_custom_command(TARGET sharedgui POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "$<TARGET_BUNDLE_CONTENT_DIR:sharedgui>/Frameworks"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:OpenSSL::SSL>"
+                "$<TARGET_FILE:OpenSSL::Crypto>"
+                "$<TARGET_BUNDLE_CONTENT_DIR:sharedgui>/Frameworks"
+            COMMENT "Staging OpenSSL runtime libraries in the macOS app bundle"
+            VERBATIM
+        )
+    endif()
 endif()
 
 install(TARGETS sharedgui
