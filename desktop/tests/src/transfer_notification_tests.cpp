@@ -2,6 +2,10 @@
 #include "daemon_application.h"
 
 #include <QtCore/QSettings>
+#include <QtCore/qscopeguard.h>
+#include <QtGui/QPalette>
+#include <QtWidgets/QApplication>
+#include <cmath>
 #include <QtCore/QDir>
 #include <QtCore/QRegularExpression>
 #include <QtCore/QTemporaryDir>
@@ -53,6 +57,61 @@ private slots:
         emit controller.peers_changed();
         emit controller.transfer_settings_changed();
         QCoreApplication::processEvents();
+    }
+
+    void colors_follow_live_palette_changes()
+    {
+        const auto original_palette = QApplication::palette();
+        const auto restore_palette = qScopeGuard([original_palette]() {
+            QApplication::setPalette(original_palette);
+        });
+        daemon_application service{};
+        app_controller controller{nullptr, app_paths{directory_.path()}};
+        controller.set_service(&service);
+        QTest::failOnWarning(QRegularExpression{QStringLiteral(".*")});
+        QQmlApplicationEngine engine{};
+        engine.setInitialProperties({
+            {QStringLiteral("app_controller"), QVariant::fromValue(&controller)},
+        });
+        engine.rootContext()->setContextProperty(QStringLiteral("app_controller"), &controller);
+        engine.loadFromModule("Shared.Gui", "Main");
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = engine.rootObjects().first();
+        auto color = [window](const char *name) {
+            auto *object = window->findChild<QObject *>(QString::fromLatin1(name));
+            return object ? object->property("color").value<QColor>() : QColor{};
+        };
+        emit service.clipboard_transfer_status({}, {}, QStringLiteral("Laptop"),
+            int(status_code::TRANSFER_STATUS_COMPLETED), QStringLiteral("Copied"));
+
+        // Change themes while the same QML window and dialogs remain alive.
+        for (bool dark : {false, true, false}) {
+            QPalette palette = original_palette;
+            palette.setColor(QPalette::Window, dark ? QColor{30, 30, 30} : QColor{250, 250, 250});
+            palette.setColor(QPalette::Base, dark ? QColor{20, 20, 20} : QColor{255, 255, 255});
+            palette.setColor(QPalette::WindowText, dark ? QColor{240, 240, 240} : QColor{32, 32, 32});
+            palette.setColor(QPalette::Text, palette.color(QPalette::WindowText));
+            QApplication::setPalette(palette);
+            QCoreApplication::processEvents();
+            QCOMPARE(color("windowBackgroundStart"), palette.color(QPalette::Window));
+            QCOMPARE(color("windowBackgroundEnd"), palette.color(QPalette::Base));
+            QCOMPARE(color("statusFooter"), palette.color(QPalette::Window));
+            QCOMPARE(color("desktopHeading"), palette.color(QPalette::WindowText));
+            for (const char *surface : {"PeersDialogSurface", "EgoGraphDialogSurface",
+                     "StitchedTopologyDialogSurface", "LogViewerSurface"}) {
+                QCOMPARE(color(surface), palette.color(QPalette::Base));
+            }
+            const auto luminance = [](const QColor &value) {
+                const auto linear = [](double channel) {
+                    return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+                };
+                return 0.2126 * linear(value.redF()) + 0.7152 * linear(value.greenF()) + 0.0722 * linear(value.blueF());
+            };
+            const auto text = luminance(color("statusMessage"));
+            const auto background = luminance(palette.color(QPalette::Window));
+            const auto contrast = (std::max(text, background) + 0.05) / (std::min(text, background) + 0.05);
+            QVERIFY2(contrast >= 4.5, "Status text must stay readable in either theme");
+        }
     }
 
     void terminal_status_notifications_data()

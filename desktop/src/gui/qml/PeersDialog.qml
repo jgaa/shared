@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Shared.Gui
 
 Dialog {
     id: root
@@ -30,11 +31,12 @@ Dialog {
         }
 
         Rectangle {
+            objectName: "PeersDialogSurface"
             Layout.fillWidth: true
             Layout.fillHeight: true
             radius: 8
-            color: "#f7f4ec"
-            border.color: "#d2c7b6"
+            color: root.palette.base
+            border.color: root.palette.mid
 
             ListView {
                 id: verified_peers_list
@@ -56,7 +58,7 @@ Dialog {
                             width: 14
                             height: 14
                             radius: 7
-                            color: status_color
+                            color: SharedColors.statusColor(status_color, root.palette.base, root.palette.text)
                         }
 
                         ColumnLayout {
@@ -97,7 +99,7 @@ Dialog {
 
                             Label {
                                 text: status_label
-                                color: status_color
+                                color: SharedColors.statusColor(status_color, root.palette.base, root.palette.text)
                                 font.bold: true
                             }
 

@@ -1,10 +1,12 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Shared.Gui
 
 Dialog {
     id: root
     required property var app_controller
+    onPaletteChanged: if (graph_canvas) graph_canvas.requestPaint()
 
     function drawDirectedEdge(ctx, edge) {
         if (!edge.show_arrow) {
@@ -15,7 +17,7 @@ Dialog {
             } else {
                 ctx.setLineDash([])
             }
-            ctx.strokeStyle = edge.color
+            ctx.strokeStyle = SharedColors.statusColor(edge.color, root.palette.base, root.palette.text)
             ctx.lineWidth = edge.dotted ? 1.5 : 2.5
             ctx.moveTo(edge.x1, edge.y1)
             ctx.lineTo(edge.x2, edge.y2)
@@ -50,7 +52,7 @@ Dialog {
         } else {
             ctx.setLineDash([])
         }
-        ctx.strokeStyle = edge.color
+        ctx.strokeStyle = SharedColors.statusColor(edge.color, root.palette.base, root.palette.text)
         ctx.lineWidth = edge.dotted ? 1.5 : 2.5
         ctx.moveTo(edge.x1, edge.y1)
         ctx.lineTo(endX, endY)
@@ -60,7 +62,7 @@ Dialog {
         ctx.save()
         ctx.beginPath()
         ctx.setLineDash([])
-        ctx.fillStyle = edge.color
+        ctx.fillStyle = SharedColors.statusColor(edge.color, root.palette.base, root.palette.text)
         ctx.moveTo(endX, endY)
         ctx.lineTo(
             arrowBaseX + perpX * arrowWidth,
@@ -96,11 +98,12 @@ Dialog {
         }
 
         Rectangle {
+            objectName: "StitchedTopologyDialogSurface"
             Layout.fillWidth: true
             Layout.fillHeight: true
             radius: 8
-            color: "#f7f4ec"
-            border.color: "#d2c7b6"
+            color: root.palette.base
+            border.color: root.palette.mid
 
             ScrollView {
                 anchors.fill: parent
@@ -152,9 +155,9 @@ Dialog {
                             Rectangle {
                                 anchors.fill: parent
                                 radius: 14
-                                color: modelData.is_local ? "#dbeef4" : "#fffaf0"
+                                color: modelData.is_local ? root.palette.alternateBase : root.palette.base
                                 border.width: modelData.is_local ? 2.5 : 1.5
-                                border.color: modelData.status_color
+                                border.color: SharedColors.statusColor(modelData.status_color, root.palette.base, root.palette.text)
                             }
 
                             Column {
@@ -176,7 +179,7 @@ Dialog {
                                     width: parent.width
                                     horizontalAlignment: Text.AlignHCenter
                                     text: modelData.status_label
-                                    color: modelData.status_color
+                                    color: SharedColors.statusColor(modelData.status_color, root.palette.base, root.palette.text)
                                     font.pixelSize: 10
                                     elide: Text.ElideRight
                                 }

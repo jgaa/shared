@@ -27,9 +27,10 @@ Dialog {
         }
 
         Rectangle {
+            objectName: "LogViewerSurface"
             Layout.fillWidth: true
             Layout.fillHeight: true
-            color: "#142028"
+            color: root.palette.base
             radius: 8
 
             ListView {
@@ -44,7 +45,7 @@ Dialog {
                     width: ListView.view.width
                     text: modelData
                     wrapMode: Text.WrapAnywhere
-                    color: "#d8edf3"
+                    color: root.palette.text
                     font.family: root.app_controller.monospace_font_family
                     font.pixelSize: 12
                 }

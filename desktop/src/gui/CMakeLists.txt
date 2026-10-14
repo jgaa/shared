@@ -9,6 +9,8 @@ target_include_directories(sharedui PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
+set_source_files_properties(qml/SharedColors.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
 qt_add_qml_module(sharedui
     URI Shared.Gui
     VERSION 1.0
@@ -17,6 +19,7 @@ qt_add_qml_module(sharedui
     RESOURCE_PREFIX /qt/qml
     OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Shared/Gui"
     QML_FILES
+        qml/SharedColors.qml
         qml/AboutDialog.qml
         qml/EgoGraphDialog.qml
         qml/LogSettings.qml

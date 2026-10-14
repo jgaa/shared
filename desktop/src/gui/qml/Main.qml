@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Shared.Gui
 
 ApplicationWindow {
     id: window
@@ -19,9 +20,10 @@ ApplicationWindow {
     visible: false
     title: app_controller.app_name
     footer: Rectangle {
+        objectName: "statusFooter"
         implicitHeight: 42
-        color: "#f7f4ec"
-        border.color: "#d2c7b6"
+        color: window.palette.window
+        border.color: window.palette.mid
         border.width: 1
 
         RowLayout {
@@ -46,17 +48,20 @@ ApplicationWindow {
             Rectangle {
                 width: 1
                 height: 18
-                color: "#d2c7b6"
+                color: window.palette.mid
                 Layout.alignment: Qt.AlignVCenter
             }
 
             Label {
+                objectName: "statusMessage"
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
                 text: app_controller.status_message.length > 0
                     ? app_controller.status_message
                     : (app_controller.configured ? "Ready" : "Setup required")
-                color: app_controller.status_message.length > 0 ? app_controller.status_color : palette.text
+                color: app_controller.status_message.length > 0
+                    ? SharedColors.statusColor(app_controller.status_color, window.palette.window, window.palette.windowText)
+                    : window.palette.windowText
                 wrapMode: Text.WordWrap
                 elide: Text.ElideRight
             }
@@ -185,8 +190,8 @@ ApplicationWindow {
     Rectangle {
         anchors.fill: parent
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#f4efe4" }
-            GradientStop { position: 1.0; color: "#d8e8f0" }
+            GradientStop { objectName: "windowBackgroundStart"; position: 0.0; color: window.palette.window }
+            GradientStop { objectName: "windowBackgroundEnd"; position: 1.0; color: window.palette.base }
         }
     }
 
@@ -213,6 +218,7 @@ ApplicationWindow {
                         text: app_controller.configured
                             ? (app_controller.trusted_agent ? "Trusted Agent" : "Desktop shell")
                             : "First-run setup"
+                        objectName: "desktopHeading"
                         font.pixelSize: 24
                         font.bold: true
                     }
@@ -487,15 +493,16 @@ ApplicationWindow {
                             width: Math.max(drop_to_peer_label.implicitWidth + 32, 160)
                             height: 52
                             radius: 8
-                            color: drop_to_peer.containsDrag ? "#dbe9d4" : "#f7f4ec"
-                            border.color: app_controller.copy_targets_available ? "#9b8f7d" : "#d2c7b6"
+                            color: drop_to_peer.containsDrag ? window.palette.highlight : window.palette.button
+                            border.color: window.palette.mid
                             border.width: 1
 
                             Label {
                                 id: drop_to_peer_label
                                 anchors.centerIn: parent
                                 text: "Drop File To Peer"
-                                color: app_controller.copy_targets_available ? palette.text : palette.mid
+                                color: !app_controller.copy_targets_available ? window.palette.disabled.buttonText
+                                    : (drop_to_peer.containsDrag ? window.palette.highlightedText : window.palette.buttonText)
                             }
 
                             DropArea {
@@ -524,15 +531,16 @@ ApplicationWindow {
                             width: Math.max(drop_to_all_label.implicitWidth + 32, 160)
                             height: 52
                             radius: 8
-                            color: drop_to_all.containsDrag ? "#dbe9d4" : "#f7f4ec"
-                            border.color: app_controller.copy_targets_available ? "#9b8f7d" : "#d2c7b6"
+                            color: drop_to_all.containsDrag ? window.palette.highlight : window.palette.button
+                            border.color: window.palette.mid
                             border.width: 1
 
                             Label {
                                 id: drop_to_all_label
                                 anchors.centerIn: parent
                                 text: "Drop File To All"
-                                color: app_controller.copy_targets_available ? palette.text : palette.mid
+                                color: !app_controller.copy_targets_available ? window.palette.disabled.buttonText
+                                    : (drop_to_all.containsDrag ? window.palette.highlightedText : window.palette.buttonText)
                             }
 
                             DropArea {
@@ -716,7 +724,7 @@ ApplicationWindow {
             Label {
                 text: "This action cannot be undone."
                 font.bold: true
-                color: "#7a130b"
+                color: SharedColors.statusColor("#b23a2e", window.palette.window, window.palette.windowText)
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
             }
