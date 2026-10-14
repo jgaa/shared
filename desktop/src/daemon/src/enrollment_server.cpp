@@ -275,6 +275,7 @@ void enrollment_server::handle_socket_ready_read(QSslSocket *socket)
         request.request_id = QUuid::createUuidV7().toString(QUuid::WithoutBraces).toLower();
         request.peer_id = request_message.requestedIdentity().peerId().uuid();
         request.name = request_message.requestedIdentity().name();
+        request.platform = request_message.requestedIdentity().platform();
         request.verification_code = request_message.verificationCode();
         request.certificate_request = request_message.certificateRequest();
         request.x25519_public_key = request_message.x25519PublicKey();

@@ -1,0 +1,43 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "proto/**"
+      - ".github/workflows/macos.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "proto/**"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: brew install cmake ninja qt openssl@3 sqlite libsodium
+      - name: Configure
+        run: |
+          cmake -S desktop -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSHARED_BUILD_HEADLESS=ON \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix openssl@3);$(brew --prefix sqlite);$(brew --prefix libsodium)"
+      - name: Build
+        run: cmake --build build --parallel 3
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install app bundle
+        run: |
+          cmake --install build --prefix "$PWD/dist"
+          test -x dist/sharedgui.app/Contents/MacOS/sharedgui
+          dist/sharedgui.app/Contents/MacOS/sharedgui --help

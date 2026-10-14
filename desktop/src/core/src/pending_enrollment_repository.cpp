@@ -31,6 +31,7 @@ QJsonObject to_json(const pending_enrollment_request &request)
         {QStringLiteral("request_id"), request.request_id},
         {QStringLiteral("peer_id"), request.peer_id},
         {QStringLiteral("name"), request.name},
+        {QStringLiteral("platform"), static_cast<int>(request.platform)},
         {QStringLiteral("verification_code"), request.verification_code},
         {QStringLiteral("certificate_request"), QString::fromLatin1(request.certificate_request.toBase64())},
         {QStringLiteral("x25519_public_key"), QString::fromLatin1(request.x25519_public_key.toBase64())},
@@ -48,6 +49,7 @@ pending_enrollment_request from_json(const QJsonObject &object)
         .certificate_request = QByteArray::fromBase64(object.value(QStringLiteral("certificate_request")).toString().toLatin1()),
         .x25519_public_key = QByteArray::fromBase64(object.value(QStringLiteral("x25519_public_key")).toString().toLatin1()),
         .created_time_ms = object.value(QStringLiteral("created_time_ms")).toString().toLongLong(),
+        .platform = static_cast<shared::v1::PlatformGadget::Platform>(object.value(QStringLiteral("platform")).toInt()),
     };
 }
 

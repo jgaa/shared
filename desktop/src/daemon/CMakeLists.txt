@@ -30,5 +30,7 @@ if(SHARED_BUILD_HEADLESS)
         sharedservice
     )
 
+    set_target_properties(shareddaemon PROPERTIES MACOSX_BUNDLE FALSE)
+
     shared_set_common_target_options(shareddaemon)
 endif()

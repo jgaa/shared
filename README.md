@@ -131,11 +131,11 @@ Core native dependencies:
 * Git
 * Qt 6.10 development packages for Core, Core5Compat, Network, Protobuf, QML/Quick, QuickControls2, and Widgets
 * OpenSSL development files
-* `pkg-config`
+* `pkg-config` (Linux)
 * SQLite3 development files
 * `libsodium`
-* `libsecret`
-* optional KWallet development files if you want the KDE wallet backend enabled
+* `libsecret` (Linux)
+* optional KWallet development files on Linux if you want the KDE wallet backend enabled
 
 ### Dependency Hints
 
@@ -195,6 +195,11 @@ Run tests with:
 ctest --test-dir build --output-on-failure
 ```
 
+To recover from an unusable local vault, run `sharedgui --reset`. This deletes
+the local vault, device identity, and enrollment state before starting services,
+then opens first-run setup so you can initialize or join again. Existing listen
+addresses and ports are retained. The reset does not require unlocking the vault.
+
 If you already have local checkouts of the fetched dependencies, you can point CMake at them:
 
 ```bash
@@ -202,6 +207,42 @@ cmake -S desktop -B build -G Ninja \
     -DSHARED_LOGFAULT_SOURCE_DIR=/path/to/logfault \
     -DSHARED_QCORO_SOURCE_DIR=/path/to/qcoro
 ```
+
+### macOS
+
+Install Xcode command-line tools and the native dependencies with Homebrew:
+
+```bash
+xcode-select --install
+brew install cmake ninja qt openssl@3 sqlite libsodium
+cmake -S desktop -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH="$(brew --prefix qt);$(brew --prefix openssl@3);$(brew --prefix sqlite);$(brew --prefix libsodium)"
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+cmake --install build --prefix "$PWD/dist"
+open dist/sharedgui.app
+```
+
+The install step deploys Qt libraries, plugins, and QML imports into the app
+bundle. SafeKeeping handles macOS Keychain access; DBus, libsecret, and KWallet
+are Linux dependencies and are not required on macOS. Install the app at its
+final location before enabling **Start automatically**. That setting writes a
+per-user LaunchAgent under `~/Library/LaunchAgents` and takes effect at the next
+login. Moving the app requires disabling and re-enabling the setting.
+
+CMake keeps the existing FetchContent defaults for dependencies. To build against
+a maintained local SafeKeeping checkout, select it explicitly (there is no
+assumption that a sibling checkout exists):
+
+```bash
+cmake -S desktop -B build \
+    -DFETCHCONTENT_SOURCE_DIR_SAFEKEEPING=/absolute/path/to/SafeKeeping
+```
+
+macOS CI builds the GUI and headless frontend, runs the isolated core tests, and
+installs the app bundle. Native Keychain prompts, login startup, clipboard/file
+transfers, and tray behavior still need a smoke test in a logged-in Mac session.
 
 ### Flatpak
 

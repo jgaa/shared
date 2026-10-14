@@ -7,7 +7,7 @@
 
 #include <array>
 
-#include <unistd.h>
+#include <QtCore/QCryptographicHash>
 
 namespace shared::desktop::core {
 
@@ -22,32 +22,58 @@ QString clean_path(QString path)
 
 }
 
+app_paths::app_paths(QString root_directory)
+    : root_directory_{std::move(root_directory)}
+{
+}
+
 QString app_paths::config_dir() const
 {
+    if (!root_directory_.isEmpty()) {
+        return QDir{root_directory_}.filePath(QStringLiteral("config"));
+    }
+
     return clean_path(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation)
         + QStringLiteral("/shared"));
 }
 
 QString app_paths::data_dir() const
 {
+    if (!root_directory_.isEmpty()) {
+        return QDir{root_directory_}.filePath(QStringLiteral("data"));
+    }
+
     return clean_path(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
         + QStringLiteral("/shared"));
 }
 
 QString app_paths::cache_dir() const
 {
+    if (!root_directory_.isEmpty()) {
+        return QDir{root_directory_}.filePath(QStringLiteral("cache"));
+    }
+
     return clean_path(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)
         + QStringLiteral("/shared"));
 }
 
 QString app_paths::runtime_dir() const
 {
+    if (!root_directory_.isEmpty()) {
+        return QDir{root_directory_}.filePath(QStringLiteral("runtime"));
+    }
+
     const auto runtime_location = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
     if (!runtime_location.isEmpty()) {
         return clean_path(runtime_location + QStringLiteral("/shared"));
     }
 
-    return clean_path(QDir::tempPath() + QStringLiteral("/shared-") + QString::number(getuid()));
+    // Qt has no portable user-id API. Hash the user's home directory to keep
+    // the fallback stable and separate for each account without native calls.
+    const auto user_token = QCryptographicHash::hash(
+        QDir::homePath().toUtf8(), QCryptographicHash::Sha256).toHex().left(16);
+    return QDir{QDir::tempPath()}.filePath(
+        QStringLiteral("shared-%1").arg(QString::fromLatin1(user_token)));
 }
 
 QString app_paths::socket_path() const

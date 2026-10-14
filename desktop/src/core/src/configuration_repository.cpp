@@ -1,4 +1,5 @@
 #include "shared/desktop/core/configuration_repository.h"
+#include "shared/desktop/core/system_integration.h"
 
 #include "shared/desktop/core/app_metadata.h"
 
@@ -55,7 +56,7 @@ configuration_repository::configuration_repository() = default;
 
 agent_configuration configuration_repository::load() const
 {
-    QSettings settings{app_metadata::organization_name, app_metadata::organization_name};
+    auto settings = system_integration::agent_settings();
     ensure_settings_ok(settings, QStringLiteral("Failed to open configuration settings store"));
 
     agent_configuration configuration{};
@@ -82,7 +83,7 @@ agent_configuration configuration_repository::load() const
 
 void configuration_repository::save(const agent_configuration &configuration)
 {
-    QSettings settings{app_metadata::organization_name, app_metadata::organization_name};
+    auto settings = system_integration::agent_settings();
     ensure_settings_ok(settings, QStringLiteral("Failed to open configuration settings store for write"));
 
     settings.setValue(QStringLiteral("agent/initialized"), configuration.initialized);

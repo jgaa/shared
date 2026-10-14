@@ -1,5 +1,7 @@
 #pragma once
 
+#include "shared.qpb.h"
+
 #include <QtCore/QMetaType>
 #include <QtCore/QString>
 
@@ -38,6 +40,7 @@ struct pending_enrollment_request {
     QByteArray certificate_request{};
     QByteArray x25519_public_key{};
     qint64 created_time_ms{};
+    shared::v1::PlatformGadget::Platform platform{shared::v1::PlatformGadget::Platform::PLATFORM_UNSPECIFIED};
 };
 
 struct pending_enrollment_decision {

@@ -1,4 +1,5 @@
 #include "peer_service.h"
+#include "shared/desktop/core/system_integration.h"
 
 #include "shared/desktop/core/envelope_io.h"
 #include "shared/desktop/core/local_peer_addresses.h"
@@ -1465,7 +1466,7 @@ void peer_service::send_local_peer_info(QSslSocket *socket)
     shared::v1::PeerIdentity identity{};
     identity.setPeerId(peer_id);
     identity.setName(configuration_.name);
-    identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
+    identity.setPlatform(core::system_integration::current_platform());
 
     shared::v1::PeerInfo peer_info{};
     peer_info.setIdentity(identity);
@@ -4470,15 +4471,14 @@ QString peer_service::unique_download_path(const QString &filename) const
         [[maybe_unused]] const auto created = QDir{}.mkpath(download_dir.path());
     }
 
-#if SHARED_FLATPAK_BUILD
     const QFileInfo configured_download_info{download_dir.path()};
-    if (!download_dir.exists() || !configured_download_info.isWritable()) {
+    if (core::system_integration::sandboxed_build()
+        && (!download_dir.exists() || !configured_download_info.isWritable())) {
         download_dir = QDir{QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)};
         if (!download_dir.exists()) {
             [[maybe_unused]] const auto created = QDir{}.mkpath(download_dir.path());
         }
     }
-#endif
 
     const QFileInfo file_info{sanitize_filename(filename)};
     const auto base_name = file_info.completeBaseName().isEmpty()

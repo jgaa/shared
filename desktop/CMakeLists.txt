@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(shared_desktop VERSION 0.4.11 LANGUAGES CXX)
+project(shared_desktop VERSION 0.5.0 LANGUAGES CXX)
 
 set(SHARED_APP_ID "eu.lastviking.shared")
 string(TIMESTAMP SHARED_APPSTREAM_RELEASE_DATE "%Y-%m-%d" UTC)
@@ -8,6 +8,9 @@ string(TIMESTAMP SHARED_APPSTREAM_RELEASE_DATE "%Y-%m-%d" UTC)
 option(SHARED_BUILD_GUI "Build the Qt/QML desktop UI" ON)
 option(SHARED_BUILD_HEADLESS "Build the headless service frontend" OFF)
 option(SHARED_FLATPAK_BUILD "Build shared_desktop for Flatpak packaging" OFF)
+if(SHARED_FLATPAK_BUILD AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "Flatpak packaging is only supported on Linux")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +21,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 include(FetchContent)
+include(CTest)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -44,8 +48,6 @@ endif()
 
 FetchContent_MakeAvailable(logfault)
 
-FetchContent_MakeAvailable(logfault)
-
 set(SHARED_QCORO_SOURCE_DIR "" CACHE PATH "Use a local source dir for QCoro")
 if(SHARED_QCORO_SOURCE_DIR AND EXISTS "${SHARED_QCORO_SOURCE_DIR}/CMakeLists.txt")
     message(STATUS "shared_desktop: using local QCoro from ${SHARED_QCORO_SOURCE_DIR}")
@@ -66,10 +68,12 @@ set(QCORO_WITH_QTTEST OFF CACHE BOOL "Disable unused QCoro QtTest support" FORCE
 FetchContent_MakeAvailable(qcoro)
 
 set(SAFEKEEPING_BUILD_TESTS OFF CACHE BOOL "Disable SafeKeeping tests in shared_desktop" FORCE)
-option (SAFEKEEPING_ENABLE_KWALLET "Enable KWallet support in shared_desktop" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    option(SAFEKEEPING_ENABLE_KWALLET "Enable KWallet support in shared_desktop" ON)
+endif()
 FetchContent_Declare(safekeeping
     GIT_REPOSITORY https://github.com/jgaa/SafeKeeping.git
-    GIT_TAG 635466b1f3508265a13b35489f58849332fde0c1
+    GIT_TAG main
 )
 FetchContent_MakeAvailable(safekeeping)
 
@@ -87,12 +91,15 @@ if(SHARED_BUILD_GUI)
     list(APPEND shared_qt_optional_components
         Concurrent
         Gui
-        DBus
         Qml
         Quick
         QuickControls2
         Widgets
     )
+endif()
+
+if(SHARED_BUILD_GUI AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND shared_qt_optional_components DBus)
 endif()
 
 if(BUILD_TESTING)
@@ -107,8 +114,6 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto SSL)
 
 qt_standard_project_setup(REQUIRES 6.10)
 
-include(CTest)
-
 include(shared_common)
 
 add_subdirectory(src/core)
@@ -121,7 +126,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-if(SHARED_BUILD_GUI)
+if(SHARED_BUILD_GUI AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/../flatpak/local.shared.Shared.metainfo.xml.in"
         "${CMAKE_CURRENT_BINARY_DIR}/${SHARED_APP_ID}.metainfo.xml"

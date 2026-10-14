@@ -1,4 +1,5 @@
 #include "shared/desktop/core/settings_repository.h"
+#include "shared/desktop/core/system_integration.h"
 
 #include "shared/desktop/core/app_metadata.h"
 
@@ -186,10 +187,7 @@ void settings_repository::set_download_path(const QString &value)
 
 QSettings settings_repository::create_settings() const
 {
-    return QSettings{
-        app_metadata::organization_name,
-        app_metadata::organization_name,
-    };
+    return system_integration::agent_settings();
 }
 
 }

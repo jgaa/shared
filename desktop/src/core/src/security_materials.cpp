@@ -1,4 +1,5 @@
 #include "shared/desktop/core/security_materials.h"
+#include "shared/desktop/core/system_integration.h"
 
 #include "shared/desktop/core/app_metadata.h"
 #include "shared/desktop/core/envelope_io.h"
@@ -212,12 +213,6 @@ void remove_directory_contents(const QString &path, const QString &message)
     }
 }
 
-void configure_vault_backend()
-{
-    safekeeping_t::setLinuxVaultRootName("eu.lastviking.shared");
-    safekeeping_t::setLinuxVaultBackend(safekeeping_t::LinuxVaultBackend::Auto);
-}
-
 std::string current_vault_namespace()
 {
     const auto override_namespace = qEnvironmentVariable(shared_vault_namespace_env).trimmed();
@@ -239,7 +234,7 @@ bool testing_vault_cleanup_enabled()
 
 void remove_current_vault_namespace()
 {
-    configure_vault_backend();
+    system_integration::configure_vault_backend();
     safekeeping_t::removeNamespace(current_vault_namespace());
 }
 
@@ -280,11 +275,15 @@ QString latest_vault_error(const safekeeping_t &vault)
 safekeeping_t::ptr_t open_vault(bool create_if_missing, QString &error_message)
 {
     initialize_vault_process_lifecycle();
-    configure_vault_backend();
+    system_integration::configure_vault_backend();
 
     try {
         safekeeping_t::ptr_t vault{};
         if (create_if_missing) {
+            if (!safekeeping_t::exists(current_vault_namespace())) {
+                qCInfo(shared_security_materials_log) << "System vault backend for creation:"
+                    << QString::fromStdString(safekeeping_t::selectedSystemVaultBackendName());
+            }
             safekeeping_t::CreateOptions options{};
             options.createSystemVaultSlot = true;
             options.requireAtLeastOneUnlockMethod = true;
@@ -297,6 +296,8 @@ safekeeping_t::ptr_t open_vault(bool create_if_missing, QString &error_message)
             return nullptr;
         }
 
+        qCInfo(shared_security_materials_log) << "System vault backend:"
+            << QString::fromStdString(vault->systemVaultBackendName());
         if (!vault->isUnlocked() && !vault->unlockWithSystemVault()) {
             error_message = latest_vault_error(*vault);
             if (error_message.isEmpty()) {
@@ -869,9 +870,11 @@ security_materials::operation_result security_materials::reset_local_agent_state
         remove_directory_contents(
             app_paths_.pending_enrollments_dir(),
             QStringLiteral("Failed to clear pending enrollment state"));
-        configure_vault_backend();
+        system_integration::configure_vault_backend();
         if (safekeeping_t::exists(current_vault_namespace())) {
-            safekeeping_t::removeNamespace(current_vault_namespace());
+            if (!safekeeping_t::removeNamespace(current_vault_namespace())) {
+                throw_security_error(QStringLiteral("Failed to remove local secret vault"));
+            }
         }
         clear_secret_cache();
     } catch (const std::exception &exception) {
@@ -1209,7 +1212,7 @@ security_materials::prepared_enrollment security_materials::prepare_enrollment_r
         shared::v1::PeerIdentity identity{};
         identity.setPeerId(peer_id);
         identity.setName(name);
-        identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
+        identity.setPlatform(system_integration::current_platform());
 
         shared::v1::EnrollmentRequest request_message{};
         request_message.setRequestedIdentity(identity);
@@ -2102,7 +2105,7 @@ shared::v1::PeerListEntry security_materials::local_peer_list_entry(
     peer_id.setUuid(configuration.peer_id);
     identity.setPeerId(peer_id);
     identity.setName(configuration.name);
-    identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
+    identity.setPlatform(system_integration::current_platform());
 
     entry.setIdentity(identity);
     const auto certificate_pem = current_peer_certificate_pem(error_message);
@@ -2132,7 +2135,7 @@ shared::v1::PeerListEntry security_materials::peer_list_entry_for_request(
     peer_id.setUuid(request.peer_id);
     identity.setPeerId(peer_id);
     identity.setName(request.name);
-    identity.setPlatform(shared::v1::PlatformGadget::Platform::PLATFORM_LINUX);
+    identity.setPlatform(request.platform);
 
     entry.setIdentity(identity);
     entry.setCertificateFingerprintSha256(certificate_fingerprint(certificate_pem, error_message));

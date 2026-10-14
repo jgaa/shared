@@ -1,6 +1,8 @@
 add_library(sharedui STATIC
     src/app_controller.h
     src/app_controller.cpp
+    src/desktop_integration.h
+    src/desktop_integration.cpp
 )
 
 target_include_directories(sharedui PUBLIC
@@ -32,7 +34,6 @@ qt_add_resources(sharedui "sharedgui_assets"
 target_link_libraries(sharedui PUBLIC
     Qt6::Concurrent
     Qt6::Core
-    Qt6::DBus
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick
@@ -41,6 +42,10 @@ target_link_libraries(sharedui PUBLIC
     sharedservice
     sharedcore
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(sharedui PRIVATE Qt6::DBus)
+endif()
 
 shared_set_common_target_options(sharedui)
 
@@ -65,4 +70,26 @@ target_link_libraries(sharedgui PRIVATE
 
 shared_set_common_target_options(sharedgui)
 
-install(TARGETS sharedgui RUNTIME DESTINATION bin)
+if(APPLE)
+    set_target_properties(sharedgui PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${SHARED_APP_ID}"
+        MACOSX_BUNDLE_BUNDLE_NAME "Shared"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+endif()
+
+install(TARGETS sharedgui
+    BUNDLE DESTINATION .
+    RUNTIME DESTINATION bin
+)
+
+if(APPLE)
+    qt_generate_deploy_qml_app_script(
+        TARGET sharedgui
+        OUTPUT_SCRIPT sharedgui_deploy_script
+        NO_UNSUPPORTED_PLATFORM_ERROR
+    )
+    install(SCRIPT ${sharedgui_deploy_script})
+endif()

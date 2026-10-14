@@ -58,5 +58,5 @@ modules:
         dest: third_party/logfault
       - type: git
         url: https://github.com/jgaa/SafeKeeping.git
-        commit: 635466b1f3508265a13b35489f58849332fde0c1
+        branch: main
         dest: third_party/safekeeping

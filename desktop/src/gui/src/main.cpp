@@ -3,8 +3,10 @@
 #include "tray_controller.h"
 
 #include "shared/desktop/core/app_metadata.h"
+#include "shared/desktop/core/configuration_repository.h"
 #include "shared/desktop/core/logging.h"
 #include "shared/desktop/core/logging_controller.h"
+#include "shared/desktop/core/security_materials.h"
 
 #include <QtCore/QCommandLineOption>
 #include <QtCore/QCommandLineParser>
@@ -14,6 +16,7 @@
 #include <QtQml/QQmlContext>
 #include <QtGui/QWindow>
 
+#include <exception>
 #include <iostream>
 #include <memory>
 
@@ -62,11 +65,16 @@ int main(int argc, char *argv[])
         QStringLiteral("autostart"),
         QStringLiteral("Start minimized to the system tray."),
     };
+    QCommandLineOption reset_option{
+        QStringLiteral("reset"),
+        QStringLiteral("Delete the local vault and agent identity, then open first-run setup."),
+    };
     parser.addOption(log_to_console_option);
     parser.addOption(log_level_option);
     parser.addOption(log_file_option);
     parser.addOption(truncate_log_file_option);
     parser.addOption(autostart_option);
+    parser.addOption(reset_option);
     parser.process(app);
 
     const auto console_level = parser.isSet(log_to_console_option)
@@ -98,6 +106,31 @@ int main(int argc, char *argv[])
 
     LOG_INFO << "Starting shared GUI";
     LOG_INFO << "Settings file: " << logging_controller.settings_file_path().toStdString();
+
+    if (parser.isSet(reset_option)) {
+        try {
+            shared::desktop::core::configuration_repository repository{};
+            const auto previous_configuration = repository.load();
+            shared::desktop::core::app_paths paths{};
+            shared::desktop::core::security_materials materials{paths};
+            const auto result = materials.reset_local_agent_state();
+            if (!result.success) {
+                LOG_ERROR << "Failed to reset local agent: " << result.error_message.toStdString();
+                return 1;
+            }
+
+            shared::desktop::core::agent_configuration configuration{};
+            configuration.enrollment_host = previous_configuration.enrollment_host;
+            configuration.enrollment_port = previous_configuration.enrollment_port;
+            configuration.peer_host = previous_configuration.peer_host;
+            configuration.peer_port = previous_configuration.peer_port;
+            repository.save(configuration);
+            LOG_INFO << "Local vault and agent identity reset to first-run setup";
+        } catch (const std::exception &exception) {
+            LOG_ERROR << "Failed to reset local agent: " << exception.what();
+            return 1;
+        }
+    }
 
     shared::desktop::daemon::daemon_application service{};
     if (!service.start()) {
@@ -138,7 +171,7 @@ int main(int argc, char *argv[])
         tray = std::make_unique<shared::desktop::gui::tray_controller>(
             &controller,
             window,
-            parser.isSet(autostart_option),
+            parser.isSet(autostart_option) && !parser.isSet(reset_option),
             &app);
         app.setQuitOnLastWindowClosed(!tray->available());
     }

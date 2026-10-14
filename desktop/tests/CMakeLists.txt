@@ -9,6 +9,8 @@ target_link_libraries(sharedcore_tests PRIVATE
     sharedcore
 )
 
+set_target_properties(sharedcore_tests PROPERTIES MACOSX_BUNDLE FALSE)
+
 shared_set_common_target_options(sharedcore_tests)
 
 add_test(NAME sharedcore_tests COMMAND sharedcore_tests)

@@ -6,6 +6,10 @@ namespace shared::desktop::core {
 
 class app_paths {
 public:
+    app_paths() = default;
+    // Optional root for isolated profiles and tests; defaults to Qt system paths.
+    explicit app_paths(QString root_directory);
+
     [[nodiscard]] QString config_dir() const;
     [[nodiscard]] QString data_dir() const;
     [[nodiscard]] QString cache_dir() const;
@@ -31,6 +35,9 @@ public:
     [[nodiscard]] QString x25519_private_key_path() const;
 
     [[nodiscard]] bool ensure_directories() const;
+
+private:
+    QString root_directory_{};
 };
 
 }

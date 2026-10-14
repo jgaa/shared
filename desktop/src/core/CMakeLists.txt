@@ -43,6 +43,8 @@ add_library(sharedcore STATIC
     src/pending_enrollment_repository.cpp
     src/security_materials.cpp
     src/app_paths.cpp
+    include/shared/desktop/core/system_integration.h
+    src/system_integration.cpp
     src/settings_repository.cpp
     src/transfer_crypto.cpp
 )

@@ -1,3 +1,4 @@
+#include "shared/desktop/core/system_integration.h"
 #include "shared/desktop/core/address_hint_repository.h"
 #include "shared/desktop/core/app_paths.h"
 #include "shared/desktop/core/configuration_repository.h"
@@ -11,11 +12,15 @@
 
 #include "shared.qpb.h"
 
+#include <safekeeping/SafeKeeping.h>
+
 #include <QtCore/QDir>
 #include <QtCore/QDataStream>
 #include <QtCore/QFile>
 #include <QtCore/QLoggingCategory>
 #include <QtCore/QTemporaryDir>
+#include <QtCore/QSettings>
+#include <QtCore/QStandardPaths>
 #include <QtTest/QTest>
 
 #include <algorithm>
@@ -36,6 +41,10 @@ public:
     explicit environment_guard(QTemporaryDir &temporary_dir)
     {
         base_path_ = temporary_dir.path();
+        previous_settings_format_ = QSettings::defaultFormat();
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, base_path_ + QStringLiteral("/config"));
+        QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, base_path_ + QStringLiteral("/system-config"));
         set_env("XDG_CONFIG_HOME", "config", previous_config_home_);
         set_env("XDG_DATA_HOME", "data", previous_data_home_);
         set_env("XDG_CACHE_HOME", "cache", previous_cache_home_);
@@ -56,8 +65,11 @@ public:
             QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
     }
 
+    [[nodiscard]] QString root_path() const { return base_path_; }
+
     ~environment_guard()
     {
+        QSettings::setDefaultFormat(previous_settings_format_);
         restore_env("XDG_CONFIG_HOME", previous_config_home_);
         restore_env("XDG_DATA_HOME", previous_data_home_);
         restore_env("XDG_CACHE_HOME", previous_cache_home_);
@@ -95,6 +107,7 @@ private:
         }
     }
 
+    QSettings::Format previous_settings_format_{};
     QString base_path_{};
     QByteArray previous_config_home_{};
     QByteArray previous_data_home_{};
@@ -109,6 +122,7 @@ class sharedcore_tests final : public QObject {
     Q_OBJECT
 
 private slots:
+    void app_paths_isolate_profiles();
     void envelope_io_round_trip();
     void envelope_io_rejects_oversized_payload();
     void configuration_repository_round_trip();
@@ -123,6 +137,29 @@ private slots:
     void security_materials_remove_peer_from_signed_list();
     void transfer_crypto_wrap_unwrap_round_trip();
 };
+
+void sharedcore_tests::app_paths_isolate_profiles()
+{
+    QTemporaryDir first{};
+    QTemporaryDir second{};
+    QVERIFY(first.isValid());
+    QVERIFY(second.isValid());
+    shared::desktop::core::app_paths first_paths{first.path()};
+    shared::desktop::core::app_paths second_paths{second.path()};
+    QVERIFY(first_paths.ensure_directories());
+    QVERIFY(second_paths.ensure_directories());
+    QVERIFY(first_paths.runtime_dir() != second_paths.runtime_dir());
+    QVERIFY(first_paths.config_dir().startsWith(first.path() + QLatin1Char('/')));
+    QVERIFY(first_paths.peer_key_path().startsWith(first_paths.runtime_dir() + QLatin1Char('/')));
+    QFile key{first_paths.peer_key_path()};
+    QVERIFY(key.open(QIODevice::WriteOnly));
+    QCOMPARE(key.write("private"), 7);
+    key.close();
+    QVERIFY(!QFile::exists(second_paths.peer_key_path()));
+    const auto permissions = QFile::permissions(first_paths.runtime_dir());
+    QVERIFY(!(permissions & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup
+        | QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther)));
+}
 
 void sharedcore_tests::envelope_io_round_trip()
 {
@@ -243,7 +280,7 @@ void sharedcore_tests::pending_enrollment_repository_round_trip()
     QVERIFY(temporary_dir.isValid());
     environment_guard guard{temporary_dir};
 
-    shared::desktop::core::app_paths app_paths{};
+    shared::desktop::core::app_paths app_paths{guard.root_path()};
     QVERIFY(app_paths.ensure_directories());
 
     shared::desktop::core::pending_enrollment_repository repository{app_paths};
@@ -251,6 +288,7 @@ void sharedcore_tests::pending_enrollment_repository_round_trip()
     request.request_id = QStringLiteral("request-1");
     request.peer_id = QStringLiteral("peer-1");
     request.name = QStringLiteral("test");
+    request.platform = shared::v1::PlatformGadget::Platform::PLATFORM_MACOS;
     request.verification_code = QStringLiteral("cafebabe");
     request.certificate_request = QByteArrayLiteral("csr");
     request.x25519_public_key = QByteArray(32, '\x11');
@@ -261,6 +299,7 @@ void sharedcore_tests::pending_enrollment_repository_round_trip()
     const auto loaded_request = repository.load_request(QStringLiteral("request-1"));
     QVERIFY(loaded_request.has_value());
     QCOMPARE(loaded_request->peer_id, QStringLiteral("peer-1"));
+    QCOMPARE(loaded_request->platform, shared::v1::PlatformGadget::Platform::PLATFORM_MACOS);
     QCOMPARE(loaded_request->verification_code, QStringLiteral("cafebabe"));
 
     repository.save_decision(QStringLiteral("request-1"), true, QStringLiteral("approved"));
@@ -296,7 +335,7 @@ void sharedcore_tests::address_hint_repository_round_trip()
     QVERIFY(temporary_dir.isValid());
     environment_guard guard{temporary_dir};
 
-    shared::desktop::core::app_paths app_paths{};
+    shared::desktop::core::app_paths app_paths{guard.root_path()};
     QVERIFY(app_paths.ensure_directories());
 
     shared::desktop::core::address_hint_repository repository{app_paths};
@@ -527,14 +566,14 @@ void sharedcore_tests::settings_repository_round_trip()
     repository.set_clipboard_limit_bytes(2 * 1024 * 1024);
     repository.set_auto_accept_clipboard(true);
     repository.set_auto_accept_files(true);
-    repository.set_download_path(QStringLiteral("/tmp/shared-downloads"));
+    repository.set_download_path(temporary_dir.filePath(QStringLiteral("shared-downloads")));
 
     QVERIFY(repository.local_socket_enabled());
     QVERIFY(repository.start_automatically());
     QCOMPARE(repository.clipboard_limit_bytes(), 2 * 1024 * 1024);
     QVERIFY(repository.auto_accept_clipboard());
     QVERIFY(repository.auto_accept_files());
-    QCOMPARE(repository.download_path(), QStringLiteral("/tmp/shared-downloads"));
+    QCOMPARE(repository.download_path(), temporary_dir.filePath(QStringLiteral("shared-downloads")));
 }
 
 void sharedcore_tests::security_materials_bootstrap_flow()
@@ -543,7 +582,7 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     QVERIFY(temporary_dir.isValid());
     environment_guard guard{temporary_dir};
 
-    shared::desktop::core::app_paths app_paths{};
+    shared::desktop::core::app_paths app_paths{guard.root_path()};
     QVERIFY(app_paths.ensure_directories());
 
     shared::desktop::core::security_materials security_materials{app_paths};
@@ -571,6 +610,8 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     QCOMPARE(enrollment.verification_code.size(), 8);
     QVERIFY(enrollment.request.hasRequestedIdentity());
     QCOMPARE(enrollment.request.requestedIdentity().name(), QStringLiteral("joining-box"));
+    QCOMPARE(enrollment.request.requestedIdentity().platform(),
+        shared::desktop::core::system_integration::current_platform());
     QCOMPARE(enrollment.request.x25519PublicKey().size(), 32);
     QVERIFY(!enrollment.request.certificateRequest().isEmpty());
 
@@ -586,6 +627,7 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     request.request_id = QStringLiteral("request-1");
     request.peer_id = enrollment.peer_id;
     request.name = QStringLiteral("joining-box");
+    request.platform = shared::v1::PlatformGadget::Platform::PLATFORM_ANDROID;
     request.verification_code = enrollment.verification_code;
     request.certificate_request = enrollment.request.certificateRequest();
     request.x25519_public_key = enrollment.request.x25519PublicKey();
@@ -607,6 +649,10 @@ void sharedcore_tests::security_materials_bootstrap_flow()
     QVERIFY2(peer_list_error.isEmpty(), qPrintable(peer_list_error));
     QCOMPARE(current_peer_list.version(), static_cast<quint32>(2));
     QCOMPARE(current_peer_list.peers().size(), 2);
+    QCOMPARE(current_peer_list.peers().first().identity().platform(),
+        shared::desktop::core::system_integration::current_platform());
+    QCOMPARE(current_peer_list.peers().last().identity().platform(),
+        shared::v1::PlatformGadget::Platform::PLATFORM_ANDROID);
 
     const auto update_result = security_materials.store_peer_list_if_newer(decision.peerList());
     QVERIFY2(update_result.success, qPrintable(update_result.error_message));
@@ -636,7 +682,7 @@ void sharedcore_tests::security_materials_reset_local_agent_state()
     QVERIFY(temporary_dir.isValid());
     environment_guard guard{temporary_dir};
 
-    shared::desktop::core::app_paths app_paths{};
+    shared::desktop::core::app_paths app_paths{guard.root_path()};
     QVERIFY(app_paths.ensure_directories());
 
     shared::desktop::core::security_materials security_materials{app_paths};
@@ -663,6 +709,19 @@ void sharedcore_tests::security_materials_reset_local_agent_state()
 
     QCOMPARE(pending_repository.load_requests().size(), 1);
 
+    // Reset must work even when the wallet key no longer unlocks the database.
+    QFile wallet_material{
+        QString::fromLocal8Bit(qgetenv("SAFEKEEPING_TEST_FAKE_VAULT_DIR"))
+        + QStringLiteral("/shared-desktop/namespace-vault-material.txt")};
+    QVERIFY(wallet_material.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(wallet_material.write(QByteArray(64, '0')), qint64{64});
+    wallet_material.close();
+    {
+        const auto vault = jgaa::safekeeping::SafeKeeping::open("shared-desktop");
+        QVERIFY(vault != nullptr);
+        QVERIFY(!vault->isUnlocked());
+    }
+
     const auto reset_result = security_materials.reset_local_agent_state();
     QVERIFY2(reset_result.success, qPrintable(reset_result.error_message));
 
@@ -674,6 +733,10 @@ void sharedcore_tests::security_materials_reset_local_agent_state()
     QVERIFY(!QFile::exists(safekeeping_vault_db_path()));
     QCOMPARE(pending_repository.load_requests().size(), 0);
     QVERIFY(QDir{app_paths.pending_enrollments_dir()}.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty());
+
+    const auto reinitialized = security_materials.initialize_local_trusted_agent(
+        QStringLiteral("reinitialized-box"), 47123);
+    QVERIFY2(reinitialized.success, qPrintable(reinitialized.error_message));
 }
 
 void sharedcore_tests::security_materials_remove_peer_from_signed_list()
@@ -682,7 +745,7 @@ void sharedcore_tests::security_materials_remove_peer_from_signed_list()
     QVERIFY(temporary_dir.isValid());
     environment_guard guard{temporary_dir};
 
-    shared::desktop::core::app_paths app_paths{};
+    shared::desktop::core::app_paths app_paths{guard.root_path()};
     QVERIFY(app_paths.ensure_directories());
 
     shared::desktop::core::security_materials security_materials{app_paths};
@@ -750,7 +813,7 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
 
     {
         environment_guard guard{recipient_dir};
-        shared::desktop::core::app_paths app_paths{};
+        shared::desktop::core::app_paths app_paths{guard.root_path()};
         QVERIFY(app_paths.ensure_directories());
 
         shared::desktop::core::security_materials security_materials{app_paths};
@@ -762,7 +825,7 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
 
     {
         environment_guard guard{sender_dir};
-        shared::desktop::core::app_paths app_paths{};
+        shared::desktop::core::app_paths app_paths{guard.root_path()};
         QVERIFY(app_paths.ensure_directories());
 
         shared::desktop::core::security_materials security_materials{app_paths};
@@ -794,7 +857,7 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
 
     {
         environment_guard guard{recipient_dir};
-        shared::desktop::core::app_paths app_paths{};
+        shared::desktop::core::app_paths app_paths{guard.root_path()};
         QVERIFY(app_paths.ensure_directories());
         shared::desktop::core::security_materials security_materials{app_paths};
         const auto restore_result = security_materials.ensure_runtime_materials();
@@ -818,6 +881,6 @@ void sharedcore_tests::transfer_crypto_wrap_unwrap_round_trip()
 
 }
 
-QTEST_MAIN(sharedcore_tests)
+QTEST_GUILESS_MAIN(sharedcore_tests)
 
 #include "sharedcore_tests.moc"
