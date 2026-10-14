@@ -10,6 +10,7 @@
 #include <exception>
 #include <QtConcurrent/QtConcurrentRun>
 #include <QtGui/QClipboard>
+#include <QtGui/QFontDatabase>
 #include <QtGui/QGuiApplication>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
@@ -486,6 +487,11 @@ QString app_controller::app_name() const
 QString app_controller::application_version() const
 {
     return QCoreApplication::applicationVersion();
+}
+
+QString app_controller::monospace_font_family() const
+{
+    return QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
 }
 
 QString app_controller::qt_version() const

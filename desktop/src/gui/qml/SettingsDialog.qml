@@ -31,7 +31,6 @@ Dialog {
         trusted_agent_host.text = app_controller.trusted_agent_host
         trusted_agent_port.value = app_controller.trusted_agent_port
         trusted_agent_peer_port.value = app_controller.trusted_agent_peer_port
-        local_socket_enabled.checked = app_controller.local_socket_enabled
         start_automatically.checked = app_controller.start_automatically
         clipboard_limit.value = app_controller.clipboard_limit_megabytes
         auto_accept_clipboard.checked = app_controller.auto_accept_clipboard
@@ -305,9 +304,9 @@ Dialog {
     }
 
     Connections {
-        target: app_controller
+        target: root.app_controller
 
-        function onTransferSettingsChanged() {
+        function onTransfer_settings_changed() {
             root.reload()
         }
     }

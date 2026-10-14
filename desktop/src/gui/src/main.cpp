@@ -138,9 +138,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    QQmlApplicationEngine engine{};
+    // The controller must outlive the QML engine and its property bindings.
     shared::desktop::gui::app_controller controller{};
     controller.set_service(&service);
+    QQmlApplicationEngine engine{};
     QObject::connect(
         &controller,
         &shared::desktop::gui::app_controller::configuration_changed,

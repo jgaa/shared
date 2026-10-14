@@ -132,10 +132,12 @@ Dialog {
 
     Dialog {
         id: confirm_remove_dialog
+        parent: root.parent
 
         anchors.centerIn: parent
         modal: true
         title: "Remove Authorized Peer"
+        width: 400
         standardButtons: Dialog.Yes | Dialog.No
 
         onAccepted: {
@@ -151,12 +153,18 @@ Dialog {
             root.pendingRemovalPeerName = ""
         }
 
-        contentItem: Label {
-            width: 360
-            wrapMode: Text.WordWrap
-            text: root.pendingRemovalPeerName.length > 0
-                ? "Remove " + root.pendingRemovalPeerName + " from the list of authorized agents? Existing connections to that peer will be dropped."
-                : "Remove this peer from the list of authorized agents? Existing connections to that peer will be dropped."
+        contentItem: Item {
+            implicitWidth: 360
+            implicitHeight: remove_peer_message.implicitHeight
+
+            Label {
+                id: remove_peer_message
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: root.pendingRemovalPeerName.length > 0
+                    ? "Remove " + root.pendingRemovalPeerName + " from the list of authorized agents? Existing connections to that peer will be dropped."
+                    : "Remove this peer from the list of authorized agents? Existing connections to that peer will be dropped."
+            }
         }
     }
 }

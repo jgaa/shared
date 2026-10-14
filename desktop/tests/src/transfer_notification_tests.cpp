@@ -3,6 +3,7 @@
 
 #include <QtCore/QSettings>
 #include <QtCore/QDir>
+#include <QtCore/QRegularExpression>
 #include <QtCore/QTemporaryDir>
 #include <QtGui/QClipboard>
 #include <QtGui/QGuiApplication>
@@ -41,6 +42,7 @@ private slots:
     void main_qml_loads_from_embedded_module()
     {
         app_controller controller{nullptr, app_paths{directory_.path()}};
+        QTest::failOnWarning(QRegularExpression{QStringLiteral(".*")});
         QQmlApplicationEngine engine{};
         engine.setInitialProperties({
             {QStringLiteral("app_controller"), QVariant::fromValue(&controller)},
@@ -48,6 +50,9 @@ private slots:
         engine.rootContext()->setContextProperty(QStringLiteral("app_controller"), &controller);
         engine.loadFromModule("Shared.Gui", "Main");
         QVERIFY2(!engine.rootObjects().isEmpty(), "Embedded Shared.Gui module must provide Main");
+        emit controller.peers_changed();
+        emit controller.transfer_settings_changed();
+        QCoreApplication::processEvents();
     }
 
     void terminal_status_notifications_data()

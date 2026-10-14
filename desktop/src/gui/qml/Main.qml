@@ -674,14 +674,21 @@ ApplicationWindow {
         anchors.centerIn: parent
         modal: true
         title: "Reinitialize Local Agent"
+        width: Math.min(window.width - 80, 460)
         standardButtons: Dialog.Yes | Dialog.No
 
         onAccepted: app_controller.reinitialize_local_agent()
 
-        contentItem: Label {
-            width: 420
-            wrapMode: Text.WordWrap
-            text: "Clear this machine's current trusted-agent or peer enrollment and return to first-run setup? Reinitialize the new trusted agent first, then reinitialize every other agent before joining them to it."
+        contentItem: Item {
+            implicitWidth: 420
+            implicitHeight: reinitialize_message.implicitHeight
+
+            Label {
+                id: reinitialize_message
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Clear this machine's current trusted-agent or peer enrollment and return to first-run setup? Reinitialize the new trusted agent first, then reinitialize every other agent before joining them to it."
+            }
         }
     }
 

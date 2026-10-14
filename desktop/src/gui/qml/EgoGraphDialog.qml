@@ -77,8 +77,8 @@ Dialog {
                         }
 
                         Connections {
-                            target: app_controller
-                            function onPeersChanged() {
+                            target: root.app_controller
+                            function onPeers_changed() {
                                 graph_canvas.requestPaint()
                             }
                         }

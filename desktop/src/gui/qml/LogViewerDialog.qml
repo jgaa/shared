@@ -45,7 +45,7 @@ Dialog {
                     text: modelData
                     wrapMode: Text.WrapAnywhere
                     color: "#d8edf3"
-                    font.family: "Monospace"
+                    font.family: root.app_controller.monospace_font_family
                     font.pixelSize: 12
                 }
             }

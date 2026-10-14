@@ -72,6 +72,7 @@ class app_controller final : public QObject {
     Q_PROPERTY(QString app_name READ app_name CONSTANT)
     Q_PROPERTY(QString application_version READ application_version CONSTANT)
     Q_PROPERTY(QString qt_version READ qt_version CONSTANT)
+    Q_PROPERTY(QString monospace_font_family READ monospace_font_family CONSTANT)
     Q_PROPERTY(QString openssl_library_version READ openssl_library_version CONSTANT)
     Q_PROPERTY(QString build_abi READ build_abi CONSTANT)
     Q_PROPERTY(QString build_timestamp READ build_timestamp CONSTANT)
@@ -147,6 +148,7 @@ public:
     [[nodiscard]] QString app_name() const;
     [[nodiscard]] QString application_version() const;
     [[nodiscard]] QString qt_version() const;
+    [[nodiscard]] QString monospace_font_family() const;
     [[nodiscard]] QString openssl_library_version() const;
     [[nodiscard]] QString build_abi() const;
     [[nodiscard]] QString build_timestamp() const;

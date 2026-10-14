@@ -2152,7 +2152,9 @@ void peer_service::handle_ssl_errors(QSslSocket *socket, const QList<QSslError> 
 
     for (const auto &error : errors) {
         if (error.error() == QSslError::HostNameMismatch) {
-            qCWarning(shared_peer_service_log)
+            // Peers authenticate their signed identity and certificate fingerprint,
+            // rather than a DNS name or changing routing address.
+            qCDebug(shared_peer_service_log)
                 << "ignoring peer TLS host-name mismatch"
                 << "peer=" << sessions_.value(socket).remote_peer_id
                 << "address=" << socket->peerAddress().toString()
